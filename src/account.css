@@ -1,0 +1,90 @@
+.alcor-chatgpt-account {
+  --plan-surface: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-l1, Canvas));
+  --plan-line: var(--dsw-alias-border-l3, color-mix(in srgb, currentColor 16%, transparent));
+  --plan-muted: var(--dsw-alias-label-secondary, color-mix(in srgb, CanvasText 70%, Canvas));
+  --plan-soft: var(--dsw-alias-interactive-bg-hover, color-mix(in srgb, currentColor 5%, transparent));
+  --plan-accent: var(--dsw-alias-text-link, LinkText);
+  --plan-danger: var(--dsw-alias-state-error-primary, #b4373a);
+  min-width: 0;
+  color: var(--dsw-alias-label-primary, CanvasText);
+  background: var(--plan-surface);
+  border: 1px solid var(--plan-line);
+  border-radius: 14px;
+  line-height: 1.45;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  container: chatgpt-plan / inline-size;
+}
+.alcor-chatgpt-account .plan-body { display: grid; gap: 14px; padding: 18px; }
+.alcor-chatgpt-account .plan-heading { display: flex; align-items: center; gap: 11px; }
+.alcor-chatgpt-account .plan-symbol {
+  display: grid; place-items: center; flex: none; width: 38px; height: 38px;
+  border-radius: 11px; background: var(--plan-soft);
+}
+.alcor-chatgpt-account svg {
+  width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.65;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.alcor-chatgpt-account .plan-identity { flex: 1; min-width: 0; }
+.alcor-chatgpt-account h3 { margin: 0; color: inherit; font-family: inherit; font-size: 16px; font-weight: 600; line-height: 1.4; }
+.alcor-chatgpt-account .plan-identity > span { color: var(--plan-muted); font-size: 12px; }
+.alcor-chatgpt-account .plan-status {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
+  color: var(--plan-muted); background: var(--plan-soft); border-radius: 999px; font-size: 12px;
+}
+.alcor-chatgpt-account .plan-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.alcor-chatgpt-account .plan-status[data-state="connected"] { color: var(--dsw-alias-state-success-primary, #237749); }
+.alcor-chatgpt-account .plan-status[data-state="pending"] { color: var(--dsw-alias-state-warn-primary, #8c5b15); }
+.alcor-chatgpt-account .plan-field { display: grid; gap: 5px; min-width: 0; color: var(--plan-muted); font-size: 12px; }
+.alcor-chatgpt-account .plan-field select {
+  box-sizing: border-box; width: 100%; min-height: 36px; padding: 6px 9px; border: 1px solid var(--plan-line);
+  border-radius: 8px; background: var(--plan-surface); color: var(--dsw-alias-label-primary, CanvasText); font: inherit; font-size: 14px;
+}
+.alcor-chatgpt-account .plan-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.alcor-chatgpt-account :is(.alcor-chatgpt-login, .plan-button) {
+  box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: 36px; padding: 6px 14px; border-radius: 8px;
+  font: inherit; font-weight: 500; cursor: pointer; text-decoration: none;
+}
+.alcor-chatgpt-account .alcor-chatgpt-login { color: #fff; background: #161616; border: 1px solid #626262; }
+.alcor-chatgpt-account .alcor-chatgpt-login:hover { background: #323232; }
+.alcor-chatgpt-account .alcor-chatgpt-login:disabled { opacity: .55; cursor: default; }
+.alcor-chatgpt-account .plan-button { color: inherit; border: 1px solid var(--plan-line); background: var(--plan-surface); }
+.alcor-chatgpt-account .plan-button:hover { background: var(--plan-soft); }
+.alcor-chatgpt-account .plan-feedback {
+  display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 13px; color: var(--plan-muted);
+}
+.alcor-chatgpt-account .plan-feedback[data-error="true"] {
+  padding: 9px 11px; border-radius: 8px;
+  background: color-mix(in srgb, var(--plan-danger) 8%, var(--plan-surface)); color: var(--dsw-alias-label-primary, CanvasText);
+}
+.alcor-chatgpt-account .plan-alert-symbol {
+  flex: none; display: grid; place-items: center; width: 16px; height: 16px; box-sizing: border-box;
+  color: var(--plan-danger); border: 1.5px solid; border-radius: 50%; font-size: 11px; font-weight: 700;
+}
+.alcor-chatgpt-account .plan-footer {
+  display: flex; align-items: center; gap: 8px; padding: 9px 16px;
+  border-top: 1px solid var(--plan-line); border-radius: 0 0 14px 14px;
+  background: color-mix(in srgb, var(--plan-surface) 96%, currentColor);
+  color: var(--plan-muted); font-size: 12px;
+}
+.alcor-chatgpt-account .plan-footer svg { flex: none; width: 16px; height: 16px; }
+.alcor-chatgpt-account .plan-footer > span { flex: 1; }
+.alcor-chatgpt-account .plan-details {
+  flex: none; color: var(--plan-accent); background: transparent; border: 0; border-radius: 5px;
+  padding: 4px; font: inherit; font-weight: 500; cursor: pointer;
+}
+.alcor-chatgpt-account .plan-details:hover { text-decoration: underline; }
+.alcor-chatgpt-account :is(a, button, select):focus-visible { outline: 2px solid var(--dsw-focus-ring-color, Highlight); outline-offset: 3px; }
+.alcor-chatgpt-disclosure { margin: 0 0 16px; }
+.alcor-chatgpt-disclosure dt { margin: 14px 0 3px; font-weight: 600; }
+.alcor-chatgpt-disclosure dd { margin: 0; color: var(--dsw-alias-label-secondary, inherit); }
+@container chatgpt-plan (max-width: 320px) {
+  .alcor-chatgpt-account .plan-body { padding: 12px; gap: 10px; }
+  .alcor-chatgpt-account .plan-heading { flex-wrap: wrap; gap: 6px 10px; }
+  .alcor-chatgpt-account .plan-symbol { display: none; }
+  .alcor-chatgpt-account .plan-identity { flex-basis: max-content; }
+  .alcor-chatgpt-account h3 { white-space: nowrap; }
+  .alcor-chatgpt-account .plan-footer { padding-inline: 10px; }
+  .alcor-chatgpt-account .plan-actions > * { flex: 1 1 auto; }
+}

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { remote } from './account-contract.js'
+import styles from './account.css'
 
 const welcomeKey = 'alcor-chatgpt-welcome-shown'
 async function unwrap(promise) {
@@ -14,6 +15,8 @@ export function ChatgptSettings({ api, subscribe }) {
   const [selection, setSelection] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState(false)
+  const [details, setDetails] = useState(false)
   const [browserUrl, setBrowserUrl] = useState('')
   const [welcome, setWelcome] = useState(false)
   const [revision, setRevision] = useState(0)
@@ -28,12 +31,12 @@ export function ChatgptSettings({ api, subscribe }) {
       try {
         const value = await unwrap(api.accountState({}))
         if (!active || current !== version.current) return
-        setError('')
+        setLoadError(false)
         setState(value)
         if (!value.pending) setBrowserUrl('')
         setSelection(selected => selected === 'new' || value.accounts.some(row => row.id === selected) ? selected : value.activeId || value.accounts[0]?.id || 'new')
         if (value.pending) timer = setTimeout(refresh, 900)
-      } catch { if (active) setError('无法读取 ChatGPT 账号，请重新加载。') }
+      } catch { if (active && current === version.current) setLoadError(true) }
     }
     refresh()
     return () => { active = false; clearTimeout(timer) }
@@ -64,29 +67,63 @@ export function ChatgptSettings({ api, subscribe }) {
     window.open(browserUrl, '_blank', 'noopener,noreferrer')
   }
 
+  const status = pending ? '等待授权' : current?.connected ? '已连接' : state ? '未连接' : '正在读取'
+  const feedback = loadError ? '无法读取账号状态。' : error || state?.notice
+  const failed = loadError || !!error || state?.noticeKind === 'error'
+
   return <section className="alcor-chatgpt-account" aria-label="ChatGPT 套餐">
-    <h3>ChatGPT 套餐</h3>
-    <p>{current?.connected ? `当前使用 ${current.label} 的 ChatGPT 套餐。` : '连接 ChatGPT 后，可在聊天的模型列表中选择账号可用的模型。'}</p>
-    <p>所选模型的对话和工具数据会发送给 OpenAI，仅使用 ChatGPT 套餐授权。只有在 ChatGPT 中另行允许使用额外积分时，才可能消耗积分。 <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">管理用量</a></p>
-    {state?.accounts.length > 0 && <label>ChatGPT 账号 <select disabled={busy || pending} value={selection} onChange={e => setSelection(e.target.value)}>
-      {state.accounts.map(row => <option key={row.id} value={row.id}>
-        {row.label}{state.accounts.some(other => other.id !== row.id && other.label === row.label) ? ` · ${row.id.slice(0, 8)}` : ''}{row.id === activeId && row.connected ? '（使用中）' : ''}
-      </option>)}
-      <option value="new">添加账号或工作区</option>
-    </select></label>}
-    <div className="alcor-chatgpt-actions">
-      {pending ? <>
-        {browserUrl && <a href={browserUrl} target="_blank" rel="noreferrer">打开登录页面</a>}
-        <Button disabled={busy} onClick={() => act(() => unwrap(api.cancelLogin({})))}>取消登录</Button>
-      </> : <>
-        {state && (!chosen?.connected || chosen.id !== activeId) &&
-          <button type="button" className="alcor-chatgpt-login" data-oai-siwc-button="" disabled={busy} onClick={() => act(connect)}>Continue with ChatGPT</button>}
-        {(chosen?.canSignOut ?? chosen?.connected) && <Button disabled={busy} variant="outline" onClick={() => act(() => unwrap(api.signOut({ accountId: chosen.id })))}>退出此账号</Button>}
-      </>}
-      {error && <Button disabled={busy} onClick={() => { setError(''); setRevision(v => v + 1) }}>重新加载</Button>}
+    <div className="plan-body">
+      <div className="plan-heading">
+        <span className="plan-symbol" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="m9 15 6-6M8.5 10.5l-2.25 2.25a4.24 4.24 0 0 0 6 6L15 16m.5-2.5 2.25-2.25a4.24 4.24 0 0 0-6-6L9 8"/></svg>
+        </span>
+        <div className="plan-identity">
+          <h3>ChatGPT 套餐</h3>
+          <span>与 Codex 共用订阅额度</span>
+        </div>
+        <span className="plan-status" data-state={pending ? 'pending' : current?.connected ? 'connected' : 'idle'} role="status">
+          {loadError ? '状态未知' : status}
+        </span>
+      </div>
+      {state?.accounts.length > 0 && <label className="plan-field">
+        <span>账号或工作区</span>
+        <select disabled={busy || pending || loadError} value={selection} onChange={e => { setError(''); setSelection(e.target.value) }}>
+          {state.accounts.map(row => <option key={row.id} value={row.id}>
+            {row.label}{state.accounts.some(other => other.id !== row.id && other.label === row.label) ? ` · ${row.id.slice(0, 8)}` : ''}{row.id === activeId && row.connected ? '（使用中）' : ''}
+          </option>)}
+          <option value="new">添加账号或工作区</option>
+        </select>
+      </label>}
+      {feedback && !pending && <div className="plan-feedback" data-error={failed} role={failed ? 'alert' : 'status'}>
+        {failed && <span className="plan-alert-symbol" aria-hidden="true">!</span>}
+        <span>{feedback}</span>
+        {loadError && <Button disabled={busy} variant="outline" onClick={() => setRevision(v => v + 1)}>重新加载</Button>}
+      </div>}
+      <div className="plan-actions">
+        {!loadError && (pending ? <>
+          {browserUrl && <a className="plan-button" href={browserUrl} target="_blank" rel="noreferrer">打开登录页面 <span aria-hidden="true">↗</span></a>}
+          <Button disabled={busy} variant="outline" onClick={() => act(() => unwrap(api.cancelLogin({})))}>取消登录</Button>
+        </> : <>
+          {state && (!chosen?.connected || chosen.id !== activeId) &&
+            <button type="button" className="alcor-chatgpt-login" data-oai-siwc-button="" disabled={busy} onClick={() => act(connect)}>Continue with ChatGPT</button>}
+          {(chosen?.canSignOut ?? chosen?.connected) && <Button disabled={busy} variant="outline" onClick={() => act(() => unwrap(api.signOut({ accountId: chosen.id })))}>退出此账号</Button>}
+        </>)}
+        <a className="plan-button" href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">管理用量 <span aria-hidden="true">↗</span></a>
+      </div>
     </div>
-    <p aria-live="polite">{pending ? '等待浏览器授权…' : state?.notice || (!state && !error ? '正在读取账号…' : '')}</p>
-    {error && <p role="alert">{error}</p>}
+    <div className="plan-footer">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.4c0 4.2 3.2 7.5 7.5 9.6 4.3-2.1 7.5-5.4 7.5-9.6V6Z"/><path d="m9 12 2 2 4-4"/></svg>
+      <span>使用此模型时，对话和工具数据会发送给 OpenAI。</span>
+      <button type="button" className="plan-details" onClick={() => setDetails(true)}>授权说明</button>
+    </div>
+    <Modal open={details} title="授权与用量" onClose={() => setDetails(false)}>
+      <dl className="alcor-chatgpt-disclosure">
+        <dt>模型访问</dt><dd>授权后，可在 Alcor 和 DSH 的对话中选择当前账号提供的模型。</dd>
+        <dt>数据范围</dt><dd>使用 OpenAI 模型时，当轮请求包含的对话、附件和工具结果会发送给 OpenAI。</dd>
+        <dt>套餐与积分</dt><dd>请求计入与 Codex 共用的 ChatGPT 额度。只有你在 ChatGPT 中另行允许时，才会使用额外积分。插件不会切换到 API 按量付费。</dd>
+      </dl>
+      <Button variant="primary" onClick={() => setDetails(false)}>关闭</Button>
+    </Modal>
     <Modal open={welcome} title="已开始使用 ChatGPT 套餐" onClose={() => setWelcome(false)}>
       <p>通过 ChatGPT 模型发送的请求将使用你的套餐额度，可在 ChatGPT 用量设置中管理。</p>
       <Button variant="primary" onClick={() => setWelcome(false)}>知道了</Button>
@@ -98,7 +135,7 @@ export async function apply(ctx) {
   await ctx.remote.$mount(remote)
   ctx.effect(() => {
     const style = document.createElement('style')
-    style.textContent = '.alcor-chatgpt-account{padding:16px;min-width:0;color:inherit}.alcor-chatgpt-account h3{margin:0 0 8px}.alcor-chatgpt-account p{margin:6px 0;overflow-wrap:anywhere}.alcor-chatgpt-account select{max-width:100%;font:inherit}.alcor-chatgpt-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px}.alcor-chatgpt-login{background:#111;color:#fff;border:1px solid #666;border-radius:8px;padding:8px 14px;font:inherit;cursor:pointer}.alcor-chatgpt-login:disabled{opacity:.6}'
+    style.textContent = styles
     document.head.append(style)
     return () => style.remove()
   })

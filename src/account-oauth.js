@@ -32,10 +32,14 @@ export function tokens(body, previous) {
     idToken: previous?.idToken ?? body.id_token }
 }
 
-export async function verifyIdentity(fetch, token, clientId, nonce, signal) {
+export async function signingKeys(fetch, signal) {
   const response = await fetch(issuer + '/.well-known/jwks.json', { redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]) })
-  if (!response.ok) throw new Error('无法验证 OpenAI 登录身份。')
-  const { payload } = await jwtVerify(token, createLocalJWKSet(await response.json()), {
+  if (!response.ok) throw await upstreamError(response)
+  return createLocalJWKSet(await response.json())
+}
+
+export async function verifyIdentity(keys, token, clientId, nonce) {
+  const { payload } = await jwtVerify(token, keys, {
     issuer, audience: clientId, algorithms: ['RS256'], clockTolerance: 5, requiredClaims: ['sub', 'iat', 'exp', 'nonce'],
   })
   if (payload.nonce !== nonce || typeof payload.sub !== 'string' || !payload.sub ||
@@ -95,9 +99,11 @@ export async function openLogin(attempt, registration, hostId, complete, finish)
       await complete({ clientId, nonce, code: p.get('code'), redirect: origin + '/auth/callback', verifier })
       reply(200, '授权流程已完成。请关闭此页，返回 DSH 查看 ChatGPT 账号。')
       finish()
-    } catch {
-      reply(400, '登录验证未完成。请关闭此页并返回 DSH。')
-      finish('未能验证 OpenAI 授权，请重新登录。')
+    } catch (error) {
+      const status = Number.isInteger(error?.status) ? `（HTTP ${error.status}）` : ''
+      const message = (attempt.stage || 'OpenAI 登录回调信息不完整') + status + '。请重新连接。'
+      reply(400, message)
+      finish(message)
     }
   })
   const listening = once(server, 'listening', { signal })

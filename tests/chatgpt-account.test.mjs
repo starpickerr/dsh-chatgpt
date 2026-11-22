@@ -151,6 +151,27 @@ test('a declined, cancelled or unverified attempt never authorizes inference', a
   assert.equal(again.params.get('prompt'), 'consent')
 })
 
+test('login failures identify the failed step without disclosing an upstream response or a code', async t => {
+  const f = fixture(t)
+  for (const [path, status, stage] of [
+    ['/api/accounts/oauth/token', 403, /授权码交换/],
+    ['/.well-known/jwks.json', 503, /签名密钥/],
+  ]) {
+    f.options.handlers[path] = () => response({ error: 'private upstream diagnostic' }, status)
+    const callback = await (await f.start()).callback()
+    assert.equal(callback.status, 400)
+    const message = await callback.text()
+    assert.match(message, stage)
+    assert.ok(message.includes('HTTP ' + status))
+    assert.doesNotMatch(message, /private upstream diagnostic|test-code|access-old|eyJ/)
+    const state = await f.account.accountState()
+    assert.equal(state.notice, message)
+    assert.equal(state.noticeKind, 'error')
+    assert.deepEqual(await f.account.listModels(), [])
+    delete f.options.handlers[path]
+  }
+})
+
 test('rotating refresh is serialized and temporary upstream failures preserve the account', async t => {
   const f = fixture(t)
   f.options.expires = 1
