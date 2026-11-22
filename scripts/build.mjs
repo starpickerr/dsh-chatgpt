@@ -9,7 +9,7 @@ await build({
 })
 const client = await build({
   entryPoints: ['src/client.jsx'], bundle: true, external: ['react', '@deepseek-ai/dsh-client-ui-primitives'],
-  loader: { '.css': 'text' }, platform: 'browser', target: 'es2022', format: 'cjs', write: false,
+  loader: { '.css': 'text', '.png': 'dataurl' }, platform: 'browser', target: 'es2022', format: 'cjs', write: false,
 })
 await writeFile('lib/client.js',
   'window.__ModuleLoader__.load({id:"@alcor/chatgpt",factory(require){const module={exports:{}};const exports=module.exports;\n'
