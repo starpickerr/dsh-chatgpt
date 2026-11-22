@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { registerProvider } from '../src/provider.js'
+import { upstreamError } from '../src/account-errors.js'
 
 const provider = 'alcor-chatgpt'
 const model = 'test-plan-model'
@@ -43,7 +44,7 @@ function setup(respond, services = {}) {
     llm: { registerAdapter(routes, value) { assert.deepEqual(routes, [provider]); adapter = value } },
   }
   registerProvider(ctx, {
-    listModels: async () => models,
+    listModels: services.listModels ?? (async () => models),
     respond: async (body, init) => { calls.push(body); return respond(body, init) },
     invalidateResponse: async (response, code) => failures.push({ response, code }),
   })
@@ -322,4 +323,51 @@ test('a rejected permission in a successful HTTP stream reaches the matching acc
     return true
   })
   assert.deepEqual(failures, [{ response: upstream, code: 'chatpass_v2_scope_not_authorized' }])
+})
+
+test('pre-stream discovery and selection failures are logged once with safe recovery details', async () => {
+  const bad = Object.assign(new Error('private response'), { status: 503, requestId: 'req_catalog' })
+  const f = setup(undefined, { listModels: async () => { throw bad } })
+  await assert.rejects(f.adapter.prepareCall(provider, model))
+  assert.equal(f.logs.length, 1)
+  assert.match(f.logs[0].message, /模型列表.*HTTP 503.*MODEL_CATALOG_FAILED.*req_catalog.*重试/)
+  assert.doesNotMatch(f.logs[0].message, /private response/)
+  const valid = setup()
+  await assert.rejects(valid.adapter.prepareCall(provider, 'private-unlisted-model'))
+  assert.match(valid.logs[0].message, /UNKNOWN_MODEL.*选择/)
+  assert.doesNotMatch(valid.logs[0].message, /private-unlisted-model/)
+})
+
+test('nested network causes and caller timeouts are distinguished from user cancellation', async () => {
+  const dns = new TypeError('private access URL', {
+    cause: Object.assign(new Error('private DNS name'), { code: 'ENOTFOUND' }),
+  })
+  const f = setup(() => { throw dns })
+  await assert.rejects(generate(f.adapter))
+  assert.match(f.logs[0].message, /ENOTFOUND.*DNS/)
+  assert.doesNotMatch(f.logs[0].message, /private/)
+  const timeout = AbortSignal.abort(new DOMException('private expired deadline', 'TimeoutError'))
+  await assert.rejects(generate(f.adapter, { ...options, signal: timeout }))
+  assert.equal(f.logs.at(-1).level, 'error')
+  assert.match(f.logs.at(-1).message, /TIMEOUT.*超时/)
+})
+
+test('a streamed reasoning parameter rejection carries the same diagnosis as an HTTP rejection', async () => {
+  const f = setup(() => sse({ type: 'response.failed', response: { error: {
+    code: 'unsupported_value', param: 'reasoning.effort', message: 'private model output',
+  } } }))
+  await assert.rejects(generate(f.adapter), { code: 'unsupported_reasoning_effort' })
+  assert.match(f.logs[0].message, /unsupported_reasoning_effort.*推理强度/)
+  assert.doesNotMatch(f.logs[0].message, /private model output/)
+})
+
+test('HTTP context limits reach the same DSH recovery code as streamed context failures', async () => {
+  const raw = Response.json({ error: { code: 'context_length_exceeded', param: 'input', message: 'private context' } },
+    { status: 400, headers: { 'x-request-id': 'req_overflow' } })
+  const f = setup(async () => { throw await upstreamError(raw) })
+  await assert.rejects(generate(f.adapter), error => error.code === 'CONTEXT_WINDOW_EXCEEDED'
+    && error.failure.status === 400 && error.failure.requestId === 'req_overflow')
+  assert.equal(f.logs.length, 1)
+  assert.match(f.logs[0].message, /context_length_exceeded.*参数 input.*req_overflow.*缩短/)
+  assert.doesNotMatch(f.logs[0].message, /private context/)
 })

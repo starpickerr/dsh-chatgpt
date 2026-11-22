@@ -1,5 +1,11 @@
 const terminal = new Set(['invalid_grant', 'invalid_refresh_token', 'token_expired', 'refresh_token_expired', 'refresh_token_invalidated', 'refresh_token_reused'])
 const errors = {
+  context_length_exceeded: '对话超过模型上下文长度，请缩短输入或新建对话。',
+  model_not_found: '当前账号无法使用所选模型，请刷新列表并重新选择。',
+  invalid_value: '请求参数值不受支持，请检查模型设置和插件版本。',
+  unsupported_value: '模型不支持此参数值，请检查模型设置和插件版本。',
+  unsupported_parameter: '模型不支持此请求参数，请检查模型设置和插件版本。',
+  missing_required_parameter: '请求缺少必要参数，请检查插件版本。',
   unsupported_reasoning_effort: '所选模型不支持这个推理强度。请在模型选择器中更换强度后重试。',
   subscription_sharing_usage_limit_exceeded: '已达到 ChatGPT 用量上限，请在 ChatGPT 用量设置查看。',
   subscription_sharing_user_not_eligible: '当前 ChatGPT 账号或工作区不能共享套餐。',
@@ -17,7 +23,15 @@ export function safeRequestId(value) {
   return typeof value === 'string' && /^req_[A-Za-z0-9_-]{1,120}$/.test(value) ? value : undefined
 }
 
-export function publicError(code, status) {
+export function safeParameter(value) {
+  // JSON paths may contain user-authored property names. Only expose known protocol fields.
+  return typeof value === 'string' && /^(?:model|input|instructions|store|stream|reasoning(?:\.effort)?|tools(?:\[\d{1,3}\])?(?:\.(?:name|type|parameters))?)$/.test(value) ? value : undefined
+}
+
+export function publicError(code, status, param) {
+  if (param === 'reasoning.effort' && (code === 'invalid_value' || code === 'unsupported_value')) {
+    code = 'unsupported_reasoning_effort'
+  }
   const known = isPlanErrorCode(code)
   const message = known ? errors[code] : ({
     401: 'OpenAI 未接受当前授权，请重新连接 ChatGPT。',
@@ -27,6 +41,7 @@ export function publicError(code, status) {
   const error = new Error(status ? `${message}（HTTP ${status}）` : message)
   if (status) error.status = status
   if (known) error.code = code
+  if (safeParameter(param)) error.param = param
   error.terminal = terminal.has(code)
   return error
 }
@@ -34,9 +49,7 @@ export function publicError(code, status) {
 export async function upstreamError(response) {
   const body = await response.json().catch(() => ({}))
   const code = typeof body?.error === 'string' ? body.error : body?.error?.code
-  const unsupportedEffort = response.status === 400 && body?.error?.param === 'reasoning.effort'
-    && (code === 'invalid_value' || code === 'unsupported_value')
-  const error = publicError(unsupportedEffort ? 'unsupported_reasoning_effort' : code, response.status)
+  const error = publicError(code, response.status, body?.error?.param)
   const requestId = safeRequestId(response.headers.get('x-request-id'))
   if (requestId) error.requestId = requestId
   return error

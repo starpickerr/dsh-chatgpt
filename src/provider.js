@@ -3,28 +3,26 @@ import {
   LlmAdapter, LlmError, offloadedImageText, requestImageHandleText, resolveImageAttachmentAccess,
 } from '@deepseek-ai/dsh-llm'
 import { responseChunks } from './response-stream.js'
-import { isPlanErrorCode, safeRequestId } from './account-errors.js'
+import { safeRequestId } from './account-errors.js'
+import { reportFailure } from './diagnostics.js'
 
 const provider = 'alcor-chatgpt'
 const namespace = 'dsh'
 // In ascending order. The ChatGPT catalog can also report levels outside the Responses wire enum.
 const responseEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-const localErrorCodes = new Set(['AUTH', 'UNKNOWN_MODEL', 'UNSUPPORTED_CONTENT', 'CONTEXT_WINDOW_EXCEEDED',
-  'EMPTY_RESPONSE', 'INCOMPLETE_RESPONSE', 'INVALID_RESPONSE', 'PROVIDER_ERROR', 'STREAM_CLOSED'])
 
-function logOutcome(ctx, level, outcome, model, requested, effective, response, error) {
+function logOutcome(ctx, level, outcome, model, requested, effective, response, error, fallbackCode, hint) {
   try {
     const safeModel = typeof model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(model) ? model : '未知'
     const effort = requested == null ? '自动' : requested === 'ultra' || responseEfforts.includes(requested) ? requested : '其他'
     const applied = effective ?? '自动'
     const fields = [outcome, '模型 ' + safeModel, '推理强度 ' + (effort === applied ? effort : effort + ' → ' + applied)]
-    const status = response?.status ?? error?.status
-    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.push('HTTP ' + status)
     if (level === 'error') {
-      const code = error?.code
-      fields.push(isPlanErrorCode(code) || localErrorCodes.has(code) ? code : 'REQUEST_FAILED')
+      reportFailure(ctx, fields.join(' · '), error, fallbackCode, hint, level, response)
+      return
     }
-    const id = safeRequestId(response?.headers.get('x-request-id') ?? error?.requestId)
+    if (response) fields.push('HTTP ' + response.status)
+    const id = safeRequestId(response?.headers.get('x-request-id'))
     if (id) fields.push('请求 ID ' + id)
     ctx.logger('ChatGPT')[level](fields.join(' · '))
   } catch { /* Diagnostics must not interrupt the conversation. */ }
@@ -151,15 +149,26 @@ export function registerProvider(ctx, account) {
   })
   async function load(signal) {
     const started = generation
-    const entries = (await account.listModels({ signal })).map(catalogEntry)
-    if (generation !== started) throw new LlmError('ChatGPT 登录状态已更改，请重新选择模型。', 'AUTH')
-    catalog = new Map(entries.map(entry => [entry.info.id, entry]))
-    return entries.map(entry => entry.info)
+    try {
+      const entries = (await account.listModels({ signal })).map(catalogEntry)
+      if (generation !== started) throw new LlmError('ChatGPT 登录状态已更改，请重新选择模型。', 'AUTH')
+      catalog = new Map(entries.map(entry => [entry.info.id, entry]))
+      return entries.map(entry => entry.info)
+    } catch (error) {
+      if (!signal?.aborted || signal.reason?.name === 'TimeoutError') {
+        reportFailure(ctx, '获取模型列表失败', error, 'MODEL_CATALOG_FAILED', '检查账号连接和网络后，稍后重试模型列表。')
+      }
+      throw error
+    }
   }
   async function lookup(model, signal) {
     if (!catalog) await load(signal)
     const entry = catalog?.get(model)
-    if (!entry) throw new LlmError('当前 ChatGPT 账号未提供此模型，请检查登录状态并重新选择。', 'UNKNOWN_MODEL')
+    if (!entry) {
+      const error = new LlmError('当前 ChatGPT 账号未提供此模型，请检查登录状态并重新选择。', 'UNKNOWN_MODEL')
+      reportFailure(ctx, '选择模型失败', error, 'UNKNOWN_MODEL', '请重新选择模型。')
+      throw error
+    }
     return entry
   }
   class ChatGPTAdapter extends LlmAdapter {
@@ -178,9 +187,10 @@ export function registerProvider(ctx, account) {
       const signal = options.signal ? AbortSignal.any([options.signal, prepared.signal]) : prepared.signal
       let info = boundModel, effective, response
       let logged = false
+      let fallbackCode = 'REQUEST_PREPARE_FAILED', hint = '请检查当前模型和本轮输入，再重试。'
       const record = (level, outcome, error) => {
         logged = true
-        logOutcome(ctx, level, outcome, info?.id, options.reasoningEffort, effective, response, error)
+        logOutcome(ctx, level, outcome, info?.id, options.reasoningEffort, effective, response, error, fallbackCode, hint)
       }
       try {
         signal.throwIfAborted()
@@ -189,7 +199,11 @@ export function registerProvider(ctx, account) {
         const body = await requestBody(ctx, { ...options, signal, reasoningEffort: effective })
         signal.throwIfAborted()
         const names = new Map((options.tools ?? []).map(tool => [wireName(tool.name), tool.name]))
+        fallbackCode = 'REQUEST_FAILED'
+        hint = '请检查账号连接、模型设置和网络后重试。'
         response = await account.respond(body, { signal })
+        fallbackCode = 'RESPONSE_STREAM_FAILED'
+        hint = '读取响应流失败，请检查网络并重试。'
         for await (const chunk of responseChunks(response, namespace, names, signal)) {
           if (chunk.type === 'finish') {
             // The host may stop iterating immediately after this terminal chunk.
@@ -199,10 +213,13 @@ export function registerProvider(ctx, account) {
           yield chunk
         }
       } catch (error) {
-        if (!logged && !options.signal?.aborted) record('error', '模型请求失败', error)
+        if (!logged && (!options.signal?.aborted || options.signal.reason?.name === 'TimeoutError')) {
+          record('error', '模型请求失败', error)
+        }
         if (response && typeof error?.code === 'string') await account.invalidateResponse(response, error.code)
         if (!response && Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599) {
-          throw new LlmError(error.message, error.code ?? `HTTP_${error.status}`, {
+          const code = error.code === 'context_length_exceeded' ? 'CONTEXT_WINDOW_EXCEEDED' : error.code
+          throw new LlmError(error.message, code ?? `HTTP_${error.status}`, {
             status: error.status, ...(error.requestId && { requestId: error.requestId }),
           })
         }

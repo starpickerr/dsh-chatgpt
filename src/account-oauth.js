@@ -52,7 +52,7 @@ export async function revoke(fetch, session, signal) {
   if (!session.tokens) return true
   // Discovery is pinned to the production issuer before sending a refresh token anywhere.
   const discovery = await fetch(issuer + '/.well-known/openid-configuration', { redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) })
-  if (!discovery.ok) return false
+  if (!discovery.ok) throw await upstreamError(discovery)
   const metadata = await discovery.json()
   const url = new URL(metadata.revocation_endpoint)
   if (metadata.issuer !== issuer || url.origin !== issuer || url.username || url.password) return false
@@ -61,17 +61,17 @@ export async function revoke(fetch, session, signal) {
       const result = await authFetch(fetch, url.href, { token: session.tokens.refresh, token_type_hint: 'refresh_token', client_id: session.clientId }, signal)
       return result.status === 200
     } catch (error) {
-      if (i || signal.aborted || (error.status && error.status < 500)) return false
+      if (i || signal.aborted || (error.status && error.status < 500)) throw error
       await new Promise(resolve => setTimeout(resolve, 250))
     }
   }
 }
 
-export async function openLogin(attempt, registration, hostId, complete, finish) {
+export async function openLogin(attempt, registration, hostId, complete, finish, report) {
   const state = random(), nonce = random(), verifier = random(), launchPath = '/start/' + random()
   const controller = attempt.controller
   const signal = controller.signal
-  let origin, authorization, claimed = false
+  let origin, authorization, claimed = false, staleReported = false
   const server = createServer(async (req, res) => {
     const reply = (status, message, headers) => {
       res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store',
@@ -85,9 +85,17 @@ export async function openLogin(attempt, registration, hostId, complete, finish)
       if (url.pathname === launchPath) return reply(302, '', { Location: authorization.href })
       if (url.pathname !== '/auth/callback') return reply(404, '无此页面。')
       const p = url.searchParams
-      if (p.getAll('state').length !== 1 || p.get('state') !== state || claimed || signal.aborted) return reply(400, '登录请求已失效。')
+      if (p.getAll('state').length !== 1 || p.get('state') !== state || claimed || signal.aborted) {
+        if (!staleReported && !signal.aborted) {
+          staleReported = true
+          report('登录回调已失效', undefined, 'LOGIN_CALLBACK_STALE', '请使用最近一次登录打开的浏览器页面。', 'warn')
+        }
+        return reply(400, '登录请求已失效。')
+      }
       claimed = true
       if (p.has('error')) {
+        if (p.get('error') === 'access_denied') report('未批准浏览器授权', undefined, 'LOGIN_DECLINED', '可在需要时重新登录。', 'info')
+        else report('浏览器授权未完成', undefined, 'LOGIN_AUTHORIZATION_FAILED', '请重新连接并在浏览器完成授权。')
         reply(400, '登录未完成，可关闭此页并返回 DSH。')
         return finish('未完成授权，可重新登录。')
       }
@@ -101,13 +109,18 @@ export async function openLogin(attempt, registration, hostId, complete, finish)
       finish()
     } catch (error) {
       const status = Number.isInteger(error?.status) ? `（HTTP ${error.status}）` : ''
-      const message = (attempt.stage || 'OpenAI 登录回调信息不完整') + status + '。请重新连接。'
+      const [stage, code, hint = '请返回 DSH 重新连接。'] = attempt.stage ?? ['OpenAI 登录回调信息不完整', 'LOGIN_CALLBACK_INVALID']
+      if (!signal.aborted) report(stage, error, code, hint)
+      const message = stage + status + '。' + hint
       reply(400, message)
       finish(message)
     }
   })
   const listening = once(server, 'listening', { signal })
-  const timer = setTimeout(() => finish('登录已超时，请重试。'), 5 * 60 * 1000)
+  const timer = setTimeout(() => {
+    report('等待浏览器授权超时', undefined, 'LOGIN_TIMEOUT', '请在 DSH 重新开始登录。', 'warn')
+    finish('登录已超时，请重试。')
+  }, 5 * 60 * 1000)
   timer.unref()
   signal.addEventListener('abort', () => { clearTimeout(timer); server.close(); server.closeIdleConnections() }, { once: true })
   server.listen({ host: '127.0.0.1', port: 0, signal })

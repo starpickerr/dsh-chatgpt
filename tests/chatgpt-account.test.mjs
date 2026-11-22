@@ -14,10 +14,11 @@ const response = (data, status = 200) => Response.json(data, { status })
 
 function fixture(t, initial) {
   let record = initial, lock = Promise.resolve()
-  const calls = [], events = [], cleanup = []
+  const calls = [], events = [], logs = [], cleanup = []
   const options = { scope, subject: 'user-1', email: 'test@example.invalid', handlers: {} }
   let authorization
   const ctx = {
+    logger(source) { return Object.fromEntries(['info', 'warn', 'error'].map(level => [level, message => logs.push({ source, level, message })])) },
     credentials: {
       async readRecord() { return structuredClone(record) },
       modifyRecord(_key, mutate) {
@@ -79,7 +80,7 @@ function fixture(t, initial) {
     }
     return { params: authorization, callback, browserUrl: result.browserUrl }
   }
-  return { account, calls, ctx, events, options, start, record: () => structuredClone(record) }
+  return { account, calls, ctx, events, logs, options, start, record: () => structuredClone(record) }
 }
 
 test('owner browser authorization is fresh, loopback-only, PKCE bound and publishes only verified account metadata', async t => {
@@ -91,7 +92,8 @@ test('owner browser authorization is fresh, loopback-only, PKCE bound and publis
   assert.equal(a.params.get('resource'), resource)
   assert.deepEqual(new Set(a.params.get('scope').split(' ')), new Set(scope.split(' ')))
   assert.match(a.params.get('ext_agent_host_id'), /^urn:uuid:/)
-  assert.equal((await a.callback({ state: 'wrong-state' })).status, 400)
+  for (let i = 0; i < 2; i++) assert.equal((await a.callback({ state: 'wrong-state' })).status, 400)
+  assert.equal(f.logs.filter(row => row.message.includes('LOGIN_CALLBACK_STALE')).length, 1)
   assert.equal((await f.account.accountState()).pending, true)
   assert.equal(f.calls.length, 0)
   assert.equal((await a.callback()).status, 200)
@@ -132,10 +134,13 @@ test('a declined, cancelled or unverified attempt never authorizes inference', a
   await assert.rejects(fetch(first.browserUrl))
   const denied = await f.start()
   assert.equal((await denied.callback({ error: 'access_denied' })).status, 400)
+  assert.equal(f.logs.at(-1).level, 'info')
+  assert.match(f.logs.at(-1).message, /LOGIN_DECLINED/)
   assert.equal(f.calls.length, 0)
   const mismatched = await f.start()
   f.options.claims = { nonce: 'wrong' }
   assert.equal((await mismatched.callback()).status, 400)
+  assert.match(f.logs.at(-1).message, /登录身份校验失败/)
   assert.deepEqual((await f.account.accountState()).accounts, [])
   f.options.claims = {}
   f.options.audience = 'wrong-app'
@@ -147,6 +152,7 @@ test('a declined, cancelled or unverified attempt never authorizes inference', a
   assert.equal(state.activeId, null)
   assert.equal(state.accounts[0].connected, false)
   assert.deepEqual(await f.account.listModels(), [])
+  assert.match(f.logs.at(-1).message, /LOGIN_SCOPE_MISSING/)
   const again = await f.start(state.accounts[0].id)
   assert.equal(again.params.get('prompt'), 'consent')
 })
@@ -168,6 +174,11 @@ test('login failures identify the failed step without disclosing an upstream res
     assert.equal(state.notice, message)
     assert.equal(state.noticeKind, 'error')
     assert.deepEqual(await f.account.listModels(), [])
+    const row = f.logs.at(-1)
+    assert.equal(row?.source, 'ChatGPT')
+    assert.match(row.message, stage)
+    assert.match(row.message, new RegExp('HTTP ' + status))
+    assert.doesNotMatch(row.message, /private upstream diagnostic|test-code|eyJ|test@example|oaiapp_fixture/)
     delete f.options.handlers[path]
   }
 })
@@ -225,6 +236,7 @@ test('terminal refresh failure invalidates only its session, and sign-out confir
   f.options.handlers['/api/accounts/oauth/token'] = () => response({ error: 'invalid_grant' }, 400)
   assert.deepEqual(await f.account.listModels(), [])
   assert.equal((await f.account.accountState()).accounts[0].connected, false)
+  assert.match(f.logs.at(-1).message, /刷新 ChatGPT 授权失败.*HTTP 400/)
   delete f.options.handlers['/api/accounts/oauth/token']
   f.options.expires = 3600
   await (await f.start(active)).callback()
@@ -240,6 +252,7 @@ test('terminal refresh failure invalidates only its session, and sign-out confir
   f.options.handlers['/api/accounts/oauth/revoke'] = () => response({}, 503)
   const local = await f.account.signOut({ accountId: active })
   assert.match(local.notice, /未确认远程撤销/)
+  assert.match(f.logs.at(-1).message, /未确认远程撤销.*HTTP 503/)
   assert.equal(local.accounts[0].connected, false)
 })
 
@@ -283,4 +296,64 @@ test('stream admission errors pause only the exact session that made the request
   await f.account.signOut({ accountId: active })
   assert.equal(f.calls.at(-1).init.body.get('client_id'), 'oaiapp_second')
   assert.equal(f.calls.at(-1).init.body.get('token'), 'refresh-old')
+})
+
+test('repeated account state reads log a storage outage once and can recover', async t => {
+  const f = fixture(t)
+  const readRecord = f.ctx.credentials.readRecord
+  f.ctx.credentials.readRecord = async () => { throw new Error('private-storage-input') }
+  await assert.rejects(f.account.accountState())
+  await assert.rejects(f.account.accountState())
+  assert.equal(f.logs.length, 1)
+  assert.match(f.logs[0].message, /ACCOUNT_READ_FAILED/)
+  assert.doesNotMatch(f.logs[0].message, /private-storage-input/)
+  f.ctx.credentials.readRecord = readRecord
+  assert.deepEqual((await f.account.accountState()).accounts, [])
+})
+
+test('failed account persistence and retryable refresh produce safe actionable diagnostics', async t => {
+  const f = fixture(t)
+  const save = f.ctx.credentials.modifyRecord
+  const unavailable = async () => { throw new Error('secret-storage-message') }
+  f.ctx.credentials.modifyRecord = unavailable
+  await assert.rejects(f.account.beginLogin())
+  assert.match(f.logs.at(-1).message, /启动 ChatGPT 登录失败.*ACCOUNT_STORAGE_FAILED/)
+  f.ctx.credentials.modifyRecord = save
+  const first = await f.start()
+  f.ctx.credentials.modifyRecord = unavailable
+  assert.equal((await first.callback()).status, 400)
+  assert.match(f.logs.at(-1).message, /保存账号连接失败.*ACCOUNT_STORAGE_FAILED/)
+  f.ctx.credentials.modifyRecord = save
+  f.options.expires = 1
+  await (await f.start()).callback()
+  f.options.handlers['/api/accounts/oauth/token'] = () => Response.json({ error: 'secret-refresh-detail' },
+    {status: 503, headers: { 'x-request-id': 'req_refresh_probe' }})
+  const before = f.logs.length
+  await assert.rejects(f.account.listModels())
+  assert.equal(f.logs.length, before + 1)
+  assert.match(f.logs.at(-1).message, /刷新 ChatGPT 授权失败.*HTTP 503.*req_refresh_probe/)
+  assert.doesNotMatch(JSON.stringify(f.logs), /secret-storage-message|secret-refresh-detail|test-code|test@example|refresh-old/)
+  delete f.options.handlers['/api/accounts/oauth/token']
+  f.options.expires = 3600
+  assert.deepEqual(await f.account.listModels(), [sample])
+})
+
+test('an expired browser login logs one timeout and releases the pending attempt', async t => {
+  const f = fixture(t)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  await f.account.beginLogin()
+  t.mock.timers.tick(5 * 60 * 1000)
+  assert.equal((await f.account.accountState()).pending, false)
+  assert.match(f.logs.at(-1).message, /LOGIN_TIMEOUT/)
+})
+
+test('a credential write failure does not hide an upstream authorization rejection', async t => {
+  const f = fixture(t)
+  await (await f.start()).callback()
+  f.ctx.credentials.modifyRecord = async () => { throw new Error('private store path') }
+  f.options.handlers['/v1/responses'] = () => Response.json({ detail: 'private upstream text' },
+    {status: 401, headers: { 'x-request-id': 'req_rejected_access' }})
+  await assert.rejects(f.account.respond({}), error => error.status === 401 && error.requestId === 'req_rejected_access')
+  assert.match(f.logs.at(-1).message, /保存.*连接状态失败.*ACCOUNT_STORAGE_FAILED/)
+  assert.doesNotMatch(JSON.stringify(f.logs), /private store path|private upstream text/)
 })
