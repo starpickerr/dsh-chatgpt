@@ -6,13 +6,15 @@ function invalidStream() {
   return new LlmError('ChatGPT 返回了不完整或无法识别的响应。', 'INVALID_RESPONSE')
 }
 
-function upstreamFailure(code, requestId) {
+function upstreamFailure(code, requestId, param) {
   const details = requestId ? { requestId } : undefined
   if (code === 'context_length_exceeded') {
     return new LlmError('对话超过此模型的上下文长度。', 'CONTEXT_WINDOW_EXCEEDED', details)
   }
-  const error = publicError(code)
-  return new LlmError(error.message, error.code ?? 'PROVIDER_ERROR', details)
+  const error = publicError(code, undefined, param)
+  const failure = new LlmError(error.message, error.code ?? 'PROVIDER_ERROR', details)
+  if (error.param) failure.param = error.param
+  return failure
 }
 
 function readBlock(item, namespace, names) {
@@ -106,7 +108,8 @@ export async function* responseChunks(response, namespace, names, signal) {
         break
       case 'error':
       case 'response.failed':
-        throw upstreamFailure(event.response?.error?.code ?? event.code, safeRequestId(response.headers.get('x-request-id')))
+        throw upstreamFailure(event.response?.error?.code ?? event.code,
+          safeRequestId(response.headers.get('x-request-id')), event.response?.error?.param ?? event.param)
       case 'response.incomplete':
         if (event.response?.incomplete_details?.reason !== 'max_output_tokens') {
           throw new LlmError('ChatGPT 响应未完成。', 'INCOMPLETE_RESPONSE')

@@ -37,11 +37,22 @@ def request(page, endpoint, **kwargs):
     return desktop.rpc(page, endpoint, {'request': kwargs})
 
 
+def incomplete_login(page, launch):
+    redirect = page.request.get(launch, max_redirects=0)
+    assert redirect.status == 302
+    params = parse_qs(urlsplit(redirect.headers['location']).query)
+    callback = params['redirect_uri'][0] + '?' + urlencode({'state':params['state'][0], 'code':'fixture-private-code'})
+    assert page.request.get(callback).status == 400
+
+
 def login(page, home):
     begin = lambda: request(page, 'alcorChatgpt/beginLogin')['browserUrl']
     first = begin()
     assert urlsplit(first).hostname == '127.0.0.1'
     assert not request(page, 'alcorChatgpt/cancelLogin')['pending']
+    incomplete_login(page, begin())
+    state = request(page, 'alcorChatgpt/accountState')
+    assert not state['pending'] and not state['activeId']
     response = page.request.get(begin(), max_redirects=0)
     assert response.status == 302
     url = urlsplit(response.headers['location'])
@@ -83,11 +94,7 @@ def check_login_control(page):
         # Exercise the error and retry controls using an incomplete synthetic registration.
         button.click()
         expect(dialog.get_by_role('button', name='取消登录')).to_be_visible()
-        launch = page.evaluate('window.planLaunch')
-        redirect = page.request.get(launch, max_redirects=0)
-        params = parse_qs(urlsplit(redirect.headers['location']).query)
-        callback = params['redirect_uri'][0] + '?' + urlencode({'state':params['state'][0], 'code':'incomplete'})
-        assert page.request.get(callback).status == 400
+        incomplete_login(page, page.evaluate('window.planLaunch'))
         expect(card.get_by_text(re.compile('回调信息不完整'))).to_be_visible()
         expect(button).to_be_enabled()
         card.screenshot(path=str(desktop.ARTIFACTS / 'chatgpt-login-error.png'))
@@ -104,7 +111,7 @@ def check_login_control(page):
     page.keyboard.press('Escape')
 
 
-def conversations(page, home, sessions):
+def conversations(page, home, sessions, host_failure_check):
     def logged(event):
         path = home / 'dsh/synthetic-events'
         deadline = time.monotonic() + 35
@@ -141,6 +148,10 @@ def conversations(page, home, sessions):
             logged('invalid-effort')
             request(page, 'session/wait', **opts, timeoutMs=10000)
         if preset == 'standard':
+            if host_failure_check:
+                prompt('BADARGS')
+                logged('result-BADARGS-standard')
+                request(page, 'session/wait', **opts, timeoutMs=10000)
             prompt('LIMIT')
             logged('quota')
             request(page, 'session/wait', **opts, timeoutMs=10000)
@@ -154,9 +165,10 @@ def conversations(page, home, sessions):
 def chatgpt_logs(page):
     records = request(page, 'alcorSecretary/logs', source='ChatGPT')['entries']
     expected = {
-        'req_fixture_tool': ('info', 'HTTP 200', 'ultra → max', '等待工具结果'),
-        'req_fixture_answer': ('info', 'HTTP 200', 'ultra → max'),
-        'req_fixture_rejected': ('error', 'HTTP 400', 'ultra → max', 'unsupported_reasoning_effort'),
+        'req_fixture_tool': ('info', 'plan-test', 'HTTP 200', 'ultra → max', '等待工具结果'),
+        'req_fixture_answer': ('info', 'plan-test', 'HTTP 200', 'ultra → max'),
+        'req_fixture_rejected': ('error', 'plan-test', 'HTTP 400', 'ultra → max', 'unsupported_reasoning_effort', '更换强度'),
+        'req_fixture_catalog_1': ('error', 'HTTP 503', 'MODEL_CATALOG_FAILED', '重试'),
     }
     ids = {}
     for rid, (level, *fields) in expected.items():
@@ -164,10 +176,14 @@ def chatgpt_logs(page):
         assert len(matches) == 1, f'Expected one ChatGPT log for {rid}, found {len(matches)}'
         row = matches[0]
         assert row['level'] == level and row['source'] == 'ChatGPT'
-        assert all(field in row['message'] for field in ['plan-test', *fields]), row['message']
+        assert all(field in row['message'] for field in fields), row['message']
         ids[rid] = row['id']
+    callback = request(page, 'alcorSecretary/logs', source='ChatGPT', query='LOGIN_CALLBACK_INVALID')['entries']
+    assert len(callback) == 1 and '重新' in callback[0]['message'], 'Expected an actionable login failure'
+    ids['callback'] = callback[0]['id']
     messages = '\n'.join(row['message'] for row in records)
-    for private in ['fixture-upstream-private', 'TOOL-alcor', 'REJECT-alcor', 'synthetic-access']:
+    for private in ['fixture-upstream-private', 'fixture-private-code', 'TOOL-alcor', 'REJECT-alcor',
+                    'synthetic-access', 'synthetic-refresh']:
         assert private not in messages, 'A ChatGPT diagnostic exposed fixture content'
     return ids
 
@@ -188,11 +204,36 @@ def check_log_page(page):
     expect(details.locator('pre')).to_contain_text('HTTP 400')
     expect(details.locator('pre')).to_contain_text('ultra → max')
     expect(details.locator('pre')).to_contain_text('req_fixture_rejected')
+    expect(details.locator('pre')).to_contain_text('更换强度')
     panel.screenshot(path=str(desktop.ARTIFACTS / 'chatgpt-runtime-log.png'))
+
+
+def host_failure_log(page, session):
+    rows = request(page, 'alcorSecretary/logs', source='DSH 对话', query='NO_ADAPTER')['entries']
+    matches = [row for row in rows if session in row['message']]
+    assert len(matches) == 1, 'Expected one searchable pre-step failure for this session'
+    row = matches[0]
+    assert row['level'] == 'error' and '重新选择' in row['message']
+    assert 'fixture-host-failure-private' not in row['message'] and 'fixture-host-error-private' not in row['message']
+    return row['id']
+
+
+def tool_failure_log(page):
+    call = 'ac520247-8ba4-4a50-b886-040d41244271'
+    rows = request(page, 'alcorSecretary/logs', source='DSH 工具', query=call)['entries']
+    assert len(rows) == 1, 'Expected one native tool failure for the rejected call'
+    row = rows[0]
+    assert row['level'] == 'error' and row['operation'] == 'tools.execute'
+    assert 'INVALID_ARGS' in row['message'] and '核对' in row['message'], row['message']
+    assert all(value not in row['message'] for value in ['BADARGS-standard', 'fixture-private-tool-argument',
+                                                         'Tool execution failed.', 'invalid arguments:'])
+    return row['id']
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host-failure-check', action='store_true',
+                        help='Also verify pre-dispatch diagnostics in an Alcor build with host failure logging.')
     parser.add_argument('archives', nargs=2, type=Path)
     args = parser.parse_args()
     desktop.verify_release()
@@ -214,10 +255,24 @@ def main():
             sessions = {preset: request(page, 'session/create', cwd=str(docs), agentPreset=preset)['sessionId']
                         for preset in ['alcor','standard']}
             login(page, home)
+            # Simulate an unavailable catalog, then retry from the same connected account.
+            outage = home / 'dsh/synthetic-catalog-unavailable'
+            outage.touch()
+            try:
+                failures = desktop.rpc(page, 'session/modelCatalog')['failures']
+                assert any(failure['id'] == 'alcor-chatgpt' for failure in failures)
+            finally:
+                outage.unlink()
             catalog = model_catalog(page)
             assert 'plan-test' in catalog and 'hidden-test' not in catalog
             assert 'ultra' not in catalog, 'The picker must hide unsupported Responses efforts'
-            conversations(page, home, sessions)
+            conversations(page, home, sessions, args.host_failure_check)
+            if args.host_failure_check:
+                tool_log = tool_failure_log(page)
+                request(page, 'session/prompt', sessionId=sessions['standard'], requestId=str(uuid4()), mode='queue',
+                        content=[{'type':'text', 'text':'fixture-host-failure-private'}])
+                request(page, 'session/wait', sessionId=sessions['standard'], timeoutMs=10000)
+                host_log = host_failure_log(page, sessions['standard'])
             saved_logs = chatgpt_logs(page)
             check_log_page(page)
             assert not errors, errors
@@ -225,7 +280,11 @@ def main():
             state = request(page, 'alcorChatgpt/accountState')
             assert state['activeId'] and 'plan-test' in model_catalog(page)
             assert chatgpt_logs(page) == saved_logs, 'ChatGPT log entries must survive a Desktop restart'
-            print('PASS ChatGPT request logs, legacy effort, HTTP 400, runtime log UI and restart', flush=True)
+            if args.host_failure_check:
+                assert host_failure_log(page, sessions['standard']) == host_log
+                assert tool_failure_log(page) == tool_log
+                print('PASS pre-dispatch host and native tool failures, correlation, remedies, privacy and restart', flush=True)
+            print('PASS login and catalog failure recovery, actionable HTTP 400, runtime log UI and restart', flush=True)
             assert not request(page, 'alcorChatgpt/signOut', accountId=state['activeId'])['activeId']
             remaining = model_catalog(page)
             assert 'plan-test' not in remaining, remaining

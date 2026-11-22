@@ -50,9 +50,10 @@ test('host proxy and other platforms retain their DSH transport and cookie-free 
 })
 
 test('unexpected destinations, failed route lookups and aborted requests never send credentials', async () => {
-  const failure = fixture({ async resolve() { throw new Error('lookup failed') } })
+  const failure = fixture({ async resolve() { throw new Error('private proxy configuration') } })
   await assert.rejects(failure.fetch('https://example.invalid'), /无效/)
-  await assert.rejects(failure.fetch(endpoint), /lookup failed/)
+  await assert.rejects(failure.fetch(endpoint), error => error.code === 'PROXY_SETUP_FAILED'
+    && error.message.includes('系统代理') && !error.message.includes('private'))
   assert.deepEqual(failure.calls, [])
   const f = fixture()
   await assert.rejects(f.fetch(endpoint, { signal: AbortSignal.abort() }), { name: 'AbortError' })

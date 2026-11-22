@@ -14,6 +14,7 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 20
 const json = value => Buffer.from(JSON.stringify(value)).toString('base64url')
 const log = message => appendFileSync(join(directory, 'synthetic-events'), message + '\n')
 const realFetch = globalThis.fetch
+let catalogFailures = 0
 globalThis.fetch = async (url, init) => {
   const { origin, pathname } = new URL(url instanceof Request ? url.url : url)
   if (origin !== issuer && origin !== resource) return realFetch(url, init)
@@ -32,6 +33,10 @@ globalThis.fetch = async (url, init) => {
       expires_in:3600, access_token:'synthetic-access', refresh_token:'synthetic-refresh'})
   }
   assert.equal(new Headers(init.headers).get('Authorization'), 'Bearer synthetic-access')
+  if (pathname === '/v1/models' && existsSync(join(directory, 'synthetic-catalog-unavailable'))) {
+    return Response.json({error:{message:'fixture-upstream-private'}},
+      {status:503, headers:{'x-request-id':'req_fixture_catalog_' + ++catalogFailures}})
+  }
   if (pathname === '/v1/models') return Response.json({models:[
     {slug:'plan-test', display_name:'Plan test', visibility:'list', default_reasoning_level:'low',
       supported_reasoning_levels:[{effort:'low'}, {effort:'max'}, {effort:'ultra'}]},
@@ -41,7 +46,7 @@ globalThis.fetch = async (url, init) => {
   const body = JSON.parse(init.body)
   assert.ok(body.stream && body.store === false && body.model === 'plan-test')
   const prompt = body.input.filter(i => i.role === 'user').map(i => JSON.stringify(i.content))
-    .findLast(text => /(?:TOOL|STOP|LIMIT|REJECT)-(?:alcor|standard)/.test(text)) || ''
+    .findLast(text => /(?:BADARGS|TOOL|STOP|LIMIT|REJECT)-(?:alcor|standard)/.test(text)) || ''
   if (prompt && body.tools?.length) assert.equal(body.reasoning?.effort, 'max', 'Expected a Responses-compatible effort')
   if (body.tools?.length && prompt.includes('REJECT-alcor')) {
     log('invalid-effort')
@@ -61,18 +66,20 @@ globalThis.fetch = async (url, init) => {
     return Response.json({error:{code:'subscription_sharing_usage_limit_exceeded'}}, {status:429})
   }
   let text = 'Synthetic title', output
-  const label = prompt.match(/TOOL-(standard|alcor)/)?.[0]
+  const label = prompt.match(/(?:BADARGS|TOOL)-(?:standard|alcor)/)?.[0]
   if (label && body.tools?.length) {
     const tool = body.tools[0].tools.find(t => t.name === 'skill')
     assert.ok(tool, 'Native DSH skill tool missing')
-    const id = 'call_' + label
+    const badArgs = label.startsWith('BADARGS-')
+    const id = badArgs ? 'ac520247-8ba4-4a50-b886-040d41244271' : 'call_' + label
     const result = body.input.find(item => item.type === 'function_call_output' && item.call_id === id)
     if (result) {
-      assert.ok(JSON.stringify(result.output).includes('list_todos'), 'Native skill result missing')
+      assert.ok(JSON.stringify(result.output).includes(badArgs ? 'Tool execution failed.' : 'list_todos'), 'Native skill result missing')
       log('result-' + label)
       text = 'Verified ' + label
     } else {
-      output = {type:'function_call',id:'fc_' + label,call_id:id,namespace:'dsh',name:'skill',arguments:'{"name":"alcor-tasks"}'}
+      const args = badArgs ? {name:{private:'fixture-private-tool-argument'}} : {name:'alcor-tasks'}
+      output = {type:'function_call',id:'fc_' + label,call_id:id,namespace:'dsh',name:'skill',arguments:JSON.stringify(args)}
     }
   }
   output ??= {type:'message',role:'assistant',id:'msg_test',content:[{type:'output_text',text}]}
@@ -85,4 +92,12 @@ globalThis.fetch = async (url, init) => {
   }
   return new Response(events.map(e => 'data: ' + JSON.stringify(e) + '\n\n').join(''), {headers})
 }
-export function apply() {}
+export function apply(ctx) {
+  ctx.on('agent/pre-step', ({messages}, next) => {
+    if (messages.some(message => message.source.kind === 'user' &&
+        message.content.some(block => block.type === 'text' && block.text === 'fixture-host-failure-private'))) {
+      throw Object.assign(new Error('fixture-host-error-private'), {code:'NO_ADAPTER'})
+    }
+    return next()
+  })
+}

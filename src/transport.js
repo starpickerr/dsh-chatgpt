@@ -53,19 +53,27 @@ export function createPlanFetch(ctx, { platform = process.platform, env = proces
     const origin = new URL(url).origin
     if (origin !== 'https://auth.openai.com' && origin !== 'https://api.openai.com') throw new Error('无效的 OpenAI 地址。')
     const options = { ...init, redirect: 'error', credentials: 'omit' }
+    options.signal?.throwIfAborted()
     // When DSH has a launch proxy it already installs its own global dispatcher and bypass rules.
     if (platform !== 'darwin' || proxyEnvironment.some(key => env[key]?.trim())) return fetch(url, options)
-    const proxy = await resolve(origin, options.signal)
-    options.signal?.throwIfAborted()
-    if (!proxy) return fetch(url, options)
-    let pool = pools.get(proxy)
-    if (!pool) {
-      pool = dispatcher(proxy, env).catch(error => {
-        pools.delete(proxy)
-        throw error
-      })
-      pools.set(proxy, pool)
+    try {
+      const proxy = await resolve(origin, options.signal)
+      options.signal?.throwIfAborted()
+      if (proxy) {
+        let pool = pools.get(proxy)
+        if (!pool) {
+          pool = dispatcher(proxy, env).catch(error => {
+            pools.delete(proxy)
+            throw error
+          })
+          pools.set(proxy, pool)
+        }
+        options.dispatcher = await pool
+      }
+    } catch (cause) {
+      options.signal?.throwIfAborted()
+      throw Object.assign(new Error('无法初始化系统代理，请检查代理设置。', { cause }), { code: 'PROXY_SETUP_FAILED' })
     }
-    return fetch(url, { ...options, dispatcher: await pool })
+    return fetch(url, options)
   }
 }
