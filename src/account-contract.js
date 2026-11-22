@@ -4,7 +4,7 @@ import { createTypertRemoteInfo } from '@deepseek-ai/dsh-typert-protocol/remote-
 const empty = z.object({}).strict()
 const id = z.string().uuid()
 const state = z.object({ accounts: z.array(z.object({ id, label: z.string(), connected: z.boolean(), canSignOut: z.boolean().optional() }).strict()),
-  activeId: id.nullable(), pending: z.boolean(), notice: z.string() }).strict()
+  activeId: id.nullable(), pending: z.boolean(), notice: z.string(), noticeKind: z.enum(['info', 'error']).optional() }).strict()
 const account = z.object({ accountId: id }).strict()
 export const methods = {
   accountState: [empty, state],

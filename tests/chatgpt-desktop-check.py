@@ -66,6 +66,8 @@ def check_login_control(page):
     dialog.get_by_role('navigation').get_by_role('button', name=re.compile('^(Models?|模型)$')).click()
     button = dialog.get_by_role('button', name='Continue with ChatGPT')
     expect(button).to_be_visible()
+    card = dialog.get_by_role('region', name='ChatGPT 套餐')
+    card.screenshot(path=str(desktop.ARTIFACTS / 'chatgpt-disconnected.png'))
     # Capture the clicked launch URL without opening a real OpenAI authorization tab.
     page.evaluate("() => {window.savedOpen = window.open; window.open = url => {window.planLaunch = url; return null}}")
     try:
@@ -75,6 +77,26 @@ def check_login_control(page):
         dialog.get_by_role('button', name='取消登录').click()
         expect(button).to_be_visible()
         assert not request(page, 'alcorChatgpt/accountState')['pending']
+
+        # Exercise the error and retry controls using an incomplete synthetic registration.
+        button.click()
+        expect(dialog.get_by_role('button', name='取消登录')).to_be_visible()
+        launch = page.evaluate('window.planLaunch')
+        redirect = page.request.get(launch, max_redirects=0)
+        params = parse_qs(urlsplit(redirect.headers['location']).query)
+        callback = params['redirect_uri'][0] + '?' + urlencode({'state':params['state'][0], 'code':'incomplete'})
+        assert page.request.get(callback).status == 400
+        expect(card.get_by_text(re.compile('回调信息不完整'))).to_be_visible()
+        expect(button).to_be_enabled()
+        card.screenshot(path=str(desktop.ARTIFACTS / 'chatgpt-login-error.png'))
+        previous = page.viewport_size
+        page.set_viewport_size({'width':540,'height':800})
+        page.emulate_media(color_scheme='dark')
+        assert card.evaluate('e => e.scrollWidth <= e.clientWidth + 1')
+        card.screenshot(path=str(desktop.ARTIFACTS / 'chatgpt-narrow.png'))
+        page.emulate_media(color_scheme='light')
+        if previous:
+            page.set_viewport_size(previous)
     finally:
         page.evaluate("() => {window.open = window.savedOpen; delete window.savedOpen; delete window.planLaunch}")
     page.keyboard.press('Escape')
@@ -132,10 +154,15 @@ def main():
     with fresh_test_home('alcor-plan-') as fixture, sync_playwright() as playwright:
         home = Path(fixture)
         docs = profile(home, fixture)
-        desktop.native_cli(home, 'plan-install', 'add', '--ignore-scripts', *(str(p.resolve(strict=True)) for p in args.archives))
-        with desktop.desktop(playwright, home, 'subscription') as (page, errors):
+        secretary, plugin = [str(p.resolve(strict=True)) for p in args.archives]
+        desktop.native_cli(home, 'plan-only-install', 'add', '--ignore-scripts', plugin)
+        with desktop.desktop(playwright, home, 'subscription-only') as (page, errors):
             assert not request(page, 'alcorChatgpt/accountState')['accounts']
             check_login_control(page)
+            assert not errors, errors
+        desktop.native_cli(home, 'plan-secretary-install', 'add', '--ignore-scripts', secretary)
+        with desktop.desktop(playwright, home, 'subscription') as (page, errors):
+            assert not request(page, 'alcorChatgpt/accountState')['accounts']
             sessions = {preset: request(page, 'session/create', cwd=str(docs), agentPreset=preset)['sessionId']
                         for preset in ['standard','alcor']}
             login(page, home)

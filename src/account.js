@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
-import { exchange, openLogin, resource, revoke, tokens, verifyIdentity } from './account-oauth.js'
+import { exchange, openLogin, resource, revoke, signingKeys, tokens, verifyIdentity } from './account-oauth.js'
 import { upstreamError } from './account-errors.js'
 
 const key = credentialKey('alcor-chatgpt', 'accounts')
@@ -23,7 +23,9 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
   const credentials = ctx.credentials
   const lifetime = new AbortController()
   let accountLife = new AbortController(), currentTag
-  let pending = null, notice = '', signingOut = null
+  let pending = null, signingOut = null
+  let feedback = { notice: '', noticeKind: 'info' }
+  function inform(notice, noticeKind = 'info') { feedback = { notice, noticeKind } }
   const read = async () => payload(await credentials.readRecord(key))
   function observe(data) {
     const next = tag(data)
@@ -34,11 +36,11 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
     accountLife = new AbortController()
     ctx.emit('llm/models-updated', 'alcor-chatgpt')
   }
-  function finish(attempt, message) {
+  function finish(attempt, message, kind = 'error') {
     if (pending !== attempt) return
     pending = null
     attempt.controller.abort()
-    if (message) notice = message
+    if (message) inform(message, kind)
   }
   ctx.on('credentials/record-updated', async changed => {
     if (changed === key && !lifetime.signal.aborted) observe(await read())
@@ -49,12 +51,12 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
     observe(data)
     return { activeId: data.activeId, accounts: data.accounts.map(item => ({
       id: item.id, label: item.email || 'ChatGPT 账号', connected: !!item.session && !!item.tokens, canSignOut: !!item.tokens,
-    })), pending: !!pending, notice }
+    })), pending: !!pending, ...feedback }
   }
   async function beginLogin({ accountId } = {}) {
     lifetime.signal.throwIfAborted()
     if (pending || signingOut) throw new Error('账号操作正在进行。')
-    notice = ''
+    inform('')
     const attempt = { controller: new AbortController() }
     const signal = attempt.controller.signal
     pending = attempt
@@ -67,9 +69,15 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
       const registration = accountId && data.accounts.find(row => row.id === accountId)
       if (accountId && !registration) throw new Error('所选 ChatGPT 账号已移除。')
       const browserUrl = await openLogin(attempt, registration, data.hostId, async ({ clientId, code, redirect, nonce, verifier }) => {
+        attempt.stage = 'OpenAI 授权码交换失败'
         const body = await exchange(fetcher, { grant_type: 'authorization_code', code, client_id: clientId, redirect_uri: redirect, code_verifier: verifier }, signal)
-        const identity = await verifyIdentity(fetcher, body.id_token, clientId, nonce, signal)
+        attempt.stage = '获取 OpenAI 签名密钥失败'
+        const keys = await signingKeys(fetcher, signal)
+        attempt.stage = 'OpenAI 登录身份校验失败'
+        const identity = await verifyIdentity(keys, body.id_token, clientId, nonce)
+        attempt.stage = 'OpenAI 返回的授权信息不完整'
         const tokenSet = tokens(body)
+        attempt.stage = '在 DSH 保存账号连接失败'
         const result = await credentials.modifyRecord(key, async current => {
           signal.throwIfAborted()
           const live = payload(current)
@@ -82,7 +90,7 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
             activeId: tokenSet ? id : (live.activeId === id ? null : live.activeId) })
         })
         observe(payload(result))
-        notice = tokenSet ? '已连接 ChatGPT 套餐。' : '已登录，但未授权使用 ChatGPT 套餐。可重新连接并授权。'
+        inform(tokenSet ? '已连接 ChatGPT 套餐。' : '已登录，但未授权使用 ChatGPT 套餐。可重新连接并授权。', tokenSet ? 'info' : 'error')
       }, message => finish(attempt, message))
       return { browserUrl }
     } catch (error) {
@@ -91,7 +99,7 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
     }
   }
   async function cancelLogin() {
-    if (pending) finish(pending, '已取消登录。')
+    if (pending) finish(pending, '已取消登录。', 'info')
     return accountState()
   }
   async function signOut({ accountId }) {
@@ -112,7 +120,7 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
           activeId: live.activeId === accountId ? null : live.activeId })
       })
       observe(payload(record))
-      notice = revoked ? '已退出 ChatGPT。' : '已退出本机账号。未确认远程撤销，请在 ChatGPT 的安全与登录设置中断开连接。'
+      inform(revoked ? '已退出 ChatGPT。' : '已退出本机账号。未确认远程撤销，请在 ChatGPT 的安全与登录设置中断开连接。', revoked ? 'info' : 'error')
       return await accountState()
     } finally { signingOut = null }
   }
@@ -144,7 +152,7 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
         return grant({ ...live, activeId: fresh ? live.activeId : null, accounts: live.accounts.map(item => item.id === row.id ? { ...item, tokens: fresh, session: fresh ? item.session : null } : item) })
       })
       observe(payload(recorded))
-      if (!fresh) { notice = 'ChatGPT 授权已失效，请重新连接。'; return null }
+      if (!fresh) { inform('ChatGPT 授权已失效，请重新连接。', 'error'); return null }
       tokenSet = fresh
     }
     activeSignal.throwIfAborted()
@@ -162,7 +170,7 @@ export function createAccount(ctx, { fetch: fetcher = globalThis.fetch } = {}) {
     })
     const live = payload(record)
     observe(live)
-    if (!live.activeId) notice = 'OpenAI 未接受本次授权，已暂停使用此账号。请检查 ChatGPT 登录连接。'
+    if (!live.activeId) inform('OpenAI 未接受本次授权，已暂停使用此账号。请检查 ChatGPT 登录连接。', 'error')
   }
   async function request(path, body, auth) {
     const response = await fetcher(resource + path, { method: body ? 'POST' : 'GET', redirect: 'error', signal: auth.signal,

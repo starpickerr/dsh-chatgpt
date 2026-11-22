@@ -1,4 +1,6 @@
-# ChatGPT 订阅
+# dsh-chatgpt · ChatGPT 订阅
+
+DSH Desktop 的独立原生模型插件，安装包名为 `@alcor/chatgpt`。在 DSH 的「插件 → 添加插件」中选择构建出的 `.tgz` 安装包。
 
 在 DSH Desktop 的「设置 → 模型」中，找到「ChatGPT 套餐」并点击 **Continue with ChatGPT**，在浏览器完成 OpenAI 授权。返回客户端后，在 Alcor 或 DSH 对话的模型选择器中选择账号提供的模型。现有对话继续使用各自的历史、工具和确认设置。也可以从插件设置查看连接、重新登录或退出。
 
