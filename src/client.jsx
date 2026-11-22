@@ -75,9 +75,7 @@ export function ChatgptSettings({ api, subscribe }) {
   return <section className="alcor-chatgpt-account" aria-label="ChatGPT 套餐">
     <div className="plan-body">
       <div className="plan-heading">
-        <span className="plan-symbol" aria-hidden="true">
-          <img src={openaiBlossom} width="30" height="30" alt="" />
-        </span>
+        <span className="plan-symbol" aria-hidden="true" style={{ maskImage: `url("${openaiBlossom}")` }} />
         <div className="plan-identity">
           <h3>ChatGPT 套餐</h3>
           <span>与 Codex 共用订阅额度</span>
