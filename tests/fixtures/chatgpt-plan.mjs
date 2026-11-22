@@ -41,8 +41,13 @@ globalThis.fetch = async (url, init) => {
   const body = JSON.parse(init.body)
   assert.ok(body.stream && body.store === false && body.model === 'plan-test')
   const prompt = body.input.filter(i => i.role === 'user').map(i => JSON.stringify(i.content))
-    .findLast(text => /(?:TOOL|STOP|LIMIT)-(?:alcor|standard)/.test(text)) || ''
+    .findLast(text => /(?:TOOL|STOP|LIMIT|REJECT)-(?:alcor|standard)/.test(text)) || ''
   if (prompt && body.tools?.length) assert.equal(body.reasoning?.effort, 'max', 'Expected a Responses-compatible effort')
+  if (body.tools?.length && prompt.includes('REJECT-alcor')) {
+    log('invalid-effort')
+    return Response.json({error:{code:'invalid_value', param:'reasoning.effort', message:'fixture-upstream-private'}},
+      {status:400, headers:{'x-request-id':'req_fixture_rejected'}})
+  }
   if (body.tools?.length && /STOP-(standard|alcor)/.test(prompt)) {
     const label = prompt.match(/STOP-(standard|alcor)/)[0]
     log(label)
@@ -74,6 +79,10 @@ globalThis.fetch = async (url, init) => {
   const events = [{type:'response.output_item.added',output_index:0,item:{...output,arguments:'',content:[]}},
     ...(output.type === 'message' ? [{type:'response.output_text.delta',output_index:0,delta:text}] : []),
     {type:'response.completed',response:{status:'completed',output:[output]}}]
-  return new Response(events.map(e => 'data: ' + JSON.stringify(e) + '\n\n').join(''), {headers:{'content-type':'text/event-stream'}})
+  const headers = {'content-type':'text/event-stream'}
+  if (label === 'TOOL-alcor' && body.tools?.length) {
+    headers['x-request-id'] = output.type === 'function_call' ? 'req_fixture_tool' : 'req_fixture_answer'
+  }
+  return new Response(events.map(e => 'data: ' + JSON.stringify(e) + '\n\n').join(''), {headers})
 }
 export function apply() {}
