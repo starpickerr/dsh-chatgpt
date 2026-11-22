@@ -19,7 +19,7 @@
 .alcor-chatgpt-account .plan-heading { display: flex; align-items: center; gap: 11px; }
 .alcor-chatgpt-account .plan-symbol {
   display: grid; place-items: center; flex: none; width: 38px; height: 38px;
-  border-radius: 11px; background: var(--plan-soft);
+  border-radius: 11px; background: #c8dfe3;
 }
 .alcor-chatgpt-account svg {
   width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.65;
@@ -82,7 +82,6 @@
 @container chatgpt-plan (max-width: 320px) {
   .alcor-chatgpt-account .plan-body { padding: 12px; gap: 10px; }
   .alcor-chatgpt-account .plan-heading { flex-wrap: wrap; gap: 6px 10px; }
-  .alcor-chatgpt-account .plan-symbol { display: none; }
   .alcor-chatgpt-account .plan-identity { flex-basis: max-content; }
   .alcor-chatgpt-account h3 { white-space: nowrap; }
   .alcor-chatgpt-account .plan-footer { padding-inline: 10px; }

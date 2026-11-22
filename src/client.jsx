@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { remote } from './account-contract.js'
 import styles from './account.css'
+import openaiBlossom from './openai-blossom.png'
 
 const welcomeKey = 'alcor-chatgpt-welcome-shown'
 async function unwrap(promise) {
@@ -75,7 +76,7 @@ export function ChatgptSettings({ api, subscribe }) {
     <div className="plan-body">
       <div className="plan-heading">
         <span className="plan-symbol" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="m9 15 6-6M8.5 10.5l-2.25 2.25a4.24 4.24 0 0 0 6 6L15 16m.5-2.5 2.25-2.25a4.24 4.24 0 0 0-6-6L9 8"/></svg>
+          <img src={openaiBlossom} width="30" height="30" alt="" />
         </span>
         <div className="plan-identity">
           <h3>ChatGPT 套餐</h3>

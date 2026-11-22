@@ -6,6 +6,8 @@ import { responseChunks } from './response-stream.js'
 
 const provider = 'alcor-chatgpt'
 const namespace = 'dsh'
+// In ascending order. The ChatGPT catalog can also report levels outside the Responses wire enum.
+const responseEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 function wireName(name) {
   if (/^[A-Za-z0-9_-]{1,64}$/.test(name) && !name.startsWith('dshx_')) return name
@@ -13,7 +15,7 @@ function wireName(name) {
   return 'dshx_' + readable + '_' + createHash('sha256').update(name).digest('base64url').slice(0, 24)
 }
 
-function modelInfo(model) {
+function catalogEntry(model) {
   const info = { provider, id: model.slug, name: model.display_name || model.slug }
   if (typeof model.description === 'string') info.description = model.description
   if (Array.isArray(model.input_modalities)) {
@@ -22,16 +24,25 @@ function modelInfo(model) {
   if (Number.isSafeInteger(model.context_window) && model.context_window > 0) {
     info.context = { contextWindow: model.context_window }
   }
-  if (Array.isArray(model.supported_reasoning_levels)) {
-    const levels = model.supported_reasoning_levels.filter(level => typeof level?.effort === 'string' && level.effort)
-    if (levels.length) {
-      info.reasoning = { efforts: levels.map(level => ({ id: level.effort, name: level.effort })) }
-      if (levels.some(level => level.effort === model.default_reasoning_level)) {
-        info.reasoning.defaultEffort = model.default_reasoning_level
-      }
-    }
+  const levels = Array.isArray(model.supported_reasoning_levels) ? model.supported_reasoning_levels : []
+  const advertised = new Set(levels.map(level => level?.effort).filter(value => typeof value === 'string' && value))
+  const available = responseEfforts.filter(effort => advertised.has(effort))
+  if (available.length) {
+    const defaultEffort = model.default_reasoning_level === 'ultra' ? available.at(-1) : model.default_reasoning_level
+    info.reasoning = { efforts: available.map(id => ({ id, name: id })) }
+    if (available.includes(defaultEffort)) info.reasoning.defaultEffort = defaultEffort
   }
-  return info
+  // DSH validates persisted selections before invoking the adapter. Admit old IDs at
+  // dispatch, while resolveModel exposes only currently selectable levels to the picker.
+  const savedIds = new Set([...responseEfforts, 'ultra', ...advertised])
+  const dispatchModel = { ...info, reasoning: { ...info.reasoning, efforts: [...savedIds].map(id => ({ id, name: id })) } }
+  return { info, dispatchModel }
+}
+
+function wireEffort(requested, reasoning) {
+  if (requested === undefined || !reasoning) return undefined
+  if (requested === 'ultra') return reasoning.efforts.at(-1).id
+  return reasoning.efforts.some(effort => effort.id === requested) ? requested : reasoning.defaultEffort
 }
 
 function assistantItems(message, model) {
@@ -119,30 +130,34 @@ export function registerProvider(ctx, account) {
   })
   async function load(signal) {
     const started = generation
-    const models = (await account.listModels({ signal })).map(modelInfo)
+    const entries = (await account.listModels({ signal })).map(catalogEntry)
     if (generation !== started) throw new LlmError('ChatGPT 登录状态已更改，请重新选择模型。', 'AUTH')
-    catalog = new Map(models.map(info => [info.id, info]))
-    return models
+    catalog = new Map(entries.map(entry => [entry.info.id, entry]))
+    return entries.map(entry => entry.info)
+  }
+  async function lookup(model, signal) {
+    if (!catalog) await load(signal)
+    const entry = catalog?.get(model)
+    if (!entry) throw new LlmError('当前 ChatGPT 账号未提供此模型，请检查登录状态并重新选择。', 'UNKNOWN_MODEL')
+    return entry
   }
   class ChatGPTAdapter extends LlmAdapter {
     providerInfo() { return { id: provider, name: 'ChatGPT' } }
     listModels() { return load() }
     async resolveModel(_provider, model, signal) {
-      if (!catalog) await load(signal)
-      const info = catalog?.get(model)
-      if (!info) throw new LlmError('当前 ChatGPT 账号未提供此模型，请检查登录状态并重新选择。', 'UNKNOWN_MODEL')
-      return info
+      return (await lookup(model, signal)).info
     }
-    async prepareCall(id, model, signal) {
+    async prepareCall(_provider, model, signal) {
       const prepared = generation
-      const info = await this.resolveModel(id, model, signal)
-      return { model: info, stream: options => this.stream(options, prepared) }
+      const { info, dispatchModel } = await lookup(model, signal)
+      return { model: dispatchModel, stream: options => this.stream(options, prepared, info) }
     }
-    async *stream(options, prepared = generation) {
+    async *stream(options, prepared = generation, boundModel) {
       // Credential lookup is asynchronous; a change during lookup must also cancel this prepared call.
       const signal = options.signal ? AbortSignal.any([options.signal, prepared.signal]) : prepared.signal
       signal.throwIfAborted()
-      const body = await requestBody(ctx, { ...options, signal })
+      const info = boundModel ?? await this.resolveModel(provider, options.model, signal)
+      const body = await requestBody(ctx, { ...options, signal, reasoningEffort: wireEffort(options.reasoningEffort, info.reasoning) })
       signal.throwIfAborted()
       const names = new Map((options.tools ?? []).map(tool => [wireName(tool.name), tool.name]))
       let response

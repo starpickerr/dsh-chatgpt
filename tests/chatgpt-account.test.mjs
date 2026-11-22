@@ -187,6 +187,17 @@ test('rotating refresh is serialized and temporary upstream failures preserve th
   assert.equal((await f.account.accountState()).accounts[0].connected, true)
 })
 
+test('a rejected reasoning effort gives an actionable error and preserves the login', async t => {
+  const f = fixture(t)
+  await (await f.start()).callback()
+  f.options.handlers['/v1/responses'] = () => response({ error: {
+    code: 'invalid_value', param: 'reasoning.effort', message: 'private upstream details',
+  } }, 400)
+  await assert.rejects(f.account.respond({}), error => error.code === 'unsupported_reasoning_effort'
+    && error.status === 400 && error.message.includes('更换强度') && !error.message.includes('private'))
+  assert.equal((await f.account.accountState()).accounts[0].connected, true)
+})
+
 test('an upstream authorization rejection pauses use, aborts in-flight work, refreshes native models and allows reconnection', async t => {
   const f = fixture(t)
   await (await f.start()).callback()
