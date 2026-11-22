@@ -67,6 +67,48 @@ test('native model catalog follows account visibility and invalidates prepared c
   assert.equal(calls.length, 0)
 })
 
+test('the picker advertises only Responses efforts the account supports, including the effective default', async () => {
+  const { adapter, models } = setup()
+  models[0].supported_reasoning_levels = ['ultra', 'max', 'low', 'max', 'preview'].map(effort => ({ effort }))
+  models[0].default_reasoning_level = 'ultra'
+  const expected = { efforts: [{ id: 'low', name: 'low' }, { id: 'max', name: 'max' }], defaultEffort: 'max' }
+  assert.deepEqual((await adapter.listModels())[0].reasoning, expected)
+  assert.deepEqual((await adapter.resolveModel(provider, model)).reasoning, expected)
+})
+
+test('DSH dispatch accepts saved efforts and sends only the selected model’s supported Responses value', async t => {
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(LlmRuntime)
+  let body
+  await ctx.plugin({
+    inject: ['llm'],
+    apply(pluginCtx) {
+      registerProvider(pluginCtx, {
+        listModels: async () => [
+          [model, ['ultra', 'high', 'max', 'preview'], 'high'],
+          ['reduced', ['high', 'low'], 'low'],
+          ['automatic', ['preview'], 'preview'],
+        ].map(([slug, levels, default_reasoning_level]) => ({
+          slug, supported_reasoning_levels: levels.map(effort => ({ effort })), default_reasoning_level,
+        })),
+        respond: async request => { body = request; return sse(complete([textItem('好')])) },
+      })
+    },
+  })
+  for (const [id, selected, expected] of [
+    [model, 'ultra', 'max'], [model, 'max', 'max'], [model, 'high', 'high'],
+    [model, 'preview', 'high'], ['reduced', 'ultra', 'high'], ['reduced', 'max', 'low'],
+    ['automatic', 'preview', undefined], ['automatic', 'ultra', undefined],
+  ]) {
+    const call = await ctx.llm.prepareCall({ provider, model: id, reasoningEffort: selected })
+    const assembly = new BlockAssembler()
+    for await (const chunk of call.stream({ ...options, ...call.config })) assembly.push(chunk)
+    assert.deepEqual(assembly.blocks(), [{ type: 'text', text: '好' }])
+    assert.deepEqual(body.reasoning, expected ? { effort: expected } : undefined)
+  }
+})
+
 test('fragmented SSE delivers Chinese text, terminal usage and the native ChatGPT conversation reply', async () => {
   const item = textItem('查到了')
   const { adapter, calls } = setup(() => sse(added(0, textItem('')),

@@ -27,6 +27,8 @@ def profile(home, fixture):
     test_plugin = Path(__file__).with_name('fixtures') / 'chatgpt-plan.mjs'
     (path / 'cordis.patch.yml').write_text(f'- insert:\n    - id: synthetic-plan-transport\n      name: {json.dumps(str(test_plugin))}\n'
         f'- id: workspace-controller\n  config:\n    documentsDirectory: {docs}\n'
+        '- id: agent-default-model\n  name: "@deepseek-ai/dsh-agent-default-model"\n'
+        '  config:\n    provider: alcor-chatgpt\n    model: plan-test\n    reasoningEffort: ultra\n'
         '- id: session-telemetry-otel\n  disabled: true\n')
     return docs
 
@@ -115,7 +117,9 @@ def conversations(page, home, sessions):
 
     for preset, session in sessions.items():
         opts = {'sessionId': session}
-        request(page, 'session/selectModel', **opts, provider='alcor-chatgpt', model='plan-test')
+        # An existing Alcor profile can still have the legacy "ultra" default.
+        if preset == 'standard':
+            request(page, 'session/selectModel', **opts, provider='alcor-chatgpt', model='plan-test', reasoningEffort='max')
         def prompt(marker):
             request(page, 'session/prompt', **opts, requestId=str(uuid4()), mode='queue',
                     content=[{'type':'text','text':marker + '-' + preset}])
@@ -164,10 +168,11 @@ def main():
         with desktop.desktop(playwright, home, 'subscription') as (page, errors):
             assert not request(page, 'alcorChatgpt/accountState')['accounts']
             sessions = {preset: request(page, 'session/create', cwd=str(docs), agentPreset=preset)['sessionId']
-                        for preset in ['standard','alcor']}
+                        for preset in ['alcor','standard']}
             login(page, home)
             catalog = model_catalog(page)
             assert 'plan-test' in catalog and 'hidden-test' not in catalog
+            assert 'ultra' not in catalog, 'The picker must hide unsupported Responses efforts'
             conversations(page, home, sessions)
             assert not errors, errors
         with desktop.desktop(playwright, home, 'subscription-restart') as (page, errors):

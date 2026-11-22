@@ -33,7 +33,8 @@ globalThis.fetch = async (url, init) => {
   }
   assert.equal(new Headers(init.headers).get('Authorization'), 'Bearer synthetic-access')
   if (pathname === '/v1/models') return Response.json({models:[
-    {slug:'plan-test', display_name:'Plan test', visibility:'list'},
+    {slug:'plan-test', display_name:'Plan test', visibility:'list', default_reasoning_level:'low',
+      supported_reasoning_levels:[{effort:'low'}, {effort:'max'}, {effort:'ultra'}]},
     {slug:'hidden-test', display_name:'Hidden test', visibility:'hide'},
   ]})
   assert.equal(pathname, '/v1/responses')
@@ -41,6 +42,7 @@ globalThis.fetch = async (url, init) => {
   assert.ok(body.stream && body.store === false && body.model === 'plan-test')
   const prompt = body.input.filter(i => i.role === 'user').map(i => JSON.stringify(i.content))
     .findLast(text => /(?:TOOL|STOP|LIMIT)-(?:alcor|standard)/.test(text)) || ''
+  if (prompt && body.tools?.length) assert.equal(body.reasoning?.effort, 'max', 'Expected a Responses-compatible effort')
   if (body.tools?.length && /STOP-(standard|alcor)/.test(prompt)) {
     const label = prompt.match(/STOP-(standard|alcor)/)[0]
     log(label)

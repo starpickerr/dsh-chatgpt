@@ -1,6 +1,6 @@
 {
   "name": "@alcor/chatgpt",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "在 DSH 与 Alcor 对话中使用 ChatGPT 订阅模型",
   "type": "module",
   "license": "MIT",

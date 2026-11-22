@@ -1,5 +1,6 @@
 const terminal = new Set(['invalid_grant', 'invalid_refresh_token', 'token_expired', 'refresh_token_expired', 'refresh_token_invalidated', 'refresh_token_reused'])
 const errors = {
+  unsupported_reasoning_effort: '所选模型不支持这个推理强度。请在模型选择器中更换强度后重试。',
   subscription_sharing_usage_limit_exceeded: '已达到 ChatGPT 用量上限，请在 ChatGPT 用量设置查看。',
   subscription_sharing_user_not_eligible: '当前 ChatGPT 账号或工作区不能共享套餐。',
   subscription_sharing_usage_unavailable: 'OpenAI 暂时无法查询套餐用量，请稍后重试。',
@@ -26,7 +27,9 @@ export function publicError(code, status) {
 export async function upstreamError(response) {
   const body = await response.json().catch(() => ({}))
   const code = typeof body?.error === 'string' ? body.error : body?.error?.code
-  const error = publicError(code, response.status)
+  const unsupportedEffort = response.status === 400 && body?.error?.param === 'reasoning.effort'
+    && (code === 'invalid_value' || code === 'unsupported_value')
+  const error = publicError(unsupportedEffort ? 'unsupported_reasoning_effort' : code, response.status)
   const requestId = response.headers.get('x-request-id')
   if (requestId && /^req_[A-Za-z0-9_-]{1,120}$/.test(requestId)) error.requestId = requestId
   return error
