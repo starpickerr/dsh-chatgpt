@@ -6,6 +6,10 @@ DSH Desktop 的独立原生模型插件，安装包名为 `@alcor/chatgpt`。在
 
 请求使用此账号授予的 ChatGPT 套餐额度。达到用量上限时，客户端显示 OpenAI 返回的限制。插件没有 API Key 或 API 按量付费路径。如果你在 ChatGPT 单独允许此应用使用额外积分，OpenAI 也可能扣除这些积分。可在 ChatGPT 的应用与网站连接设置中核对用量、调整许可或撤销授权。[OpenAI 套餐用量说明](https://help.openai.com/en/articles/20001542-using-your-chatgpt-plan-in-other-apps-and-sites)
 
+安装了 Alcor 时，可在「系统 → 日志」将来源选为 `ChatGPT`，查看模型请求结果。旧会话的推理强度发生转换时，日志会同时显示原档位和实际档位，例如 `ultra → max`。
+
+设置页使用的 Blossom 标志归 OpenAI 所有。[OpenAI 品牌资源](https://openai.com/brand/)
+
 ## 独立开发
 
 使用 Node.js 24.9 或更高版本，在本仓库运行：

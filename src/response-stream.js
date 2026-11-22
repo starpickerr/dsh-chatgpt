@@ -1,6 +1,6 @@
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { EventSourceParserStream } from 'eventsource-parser/stream'
-import { publicError } from './account-errors.js'
+import { publicError, safeRequestId } from './account-errors.js'
 
 function invalidStream() {
   return new LlmError('ChatGPT 返回了不完整或无法识别的响应。', 'INVALID_RESPONSE')
@@ -106,7 +106,7 @@ export async function* responseChunks(response, namespace, names, signal) {
         break
       case 'error':
       case 'response.failed':
-        throw upstreamFailure(event.response?.error?.code ?? event.code, response.headers.get('x-request-id'))
+        throw upstreamFailure(event.response?.error?.code ?? event.code, safeRequestId(response.headers.get('x-request-id')))
       case 'response.incomplete':
         if (event.response?.incomplete_details?.reason !== 'max_output_tokens') {
           throw new LlmError('ChatGPT 响应未完成。', 'INCOMPLETE_RESPONSE')

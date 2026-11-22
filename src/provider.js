@@ -3,11 +3,32 @@ import {
   LlmAdapter, LlmError, offloadedImageText, requestImageHandleText, resolveImageAttachmentAccess,
 } from '@deepseek-ai/dsh-llm'
 import { responseChunks } from './response-stream.js'
+import { isPlanErrorCode, safeRequestId } from './account-errors.js'
 
 const provider = 'alcor-chatgpt'
 const namespace = 'dsh'
 // In ascending order. The ChatGPT catalog can also report levels outside the Responses wire enum.
 const responseEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const localErrorCodes = new Set(['AUTH', 'UNKNOWN_MODEL', 'UNSUPPORTED_CONTENT', 'CONTEXT_WINDOW_EXCEEDED',
+  'EMPTY_RESPONSE', 'INCOMPLETE_RESPONSE', 'INVALID_RESPONSE', 'PROVIDER_ERROR', 'STREAM_CLOSED'])
+
+function logOutcome(ctx, level, outcome, model, requested, effective, response, error) {
+  try {
+    const safeModel = typeof model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(model) ? model : '未知'
+    const effort = requested == null ? '自动' : requested === 'ultra' || responseEfforts.includes(requested) ? requested : '其他'
+    const applied = effective ?? '自动'
+    const fields = [outcome, '模型 ' + safeModel, '推理强度 ' + (effort === applied ? effort : effort + ' → ' + applied)]
+    const status = response?.status ?? error?.status
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.push('HTTP ' + status)
+    if (level === 'error') {
+      const code = error?.code
+      fields.push(isPlanErrorCode(code) || localErrorCodes.has(code) ? code : 'REQUEST_FAILED')
+    }
+    const id = safeRequestId(response?.headers.get('x-request-id') ?? error?.requestId)
+    if (id) fields.push('请求 ID ' + id)
+    ctx.logger('ChatGPT')[level](fields.join(' · '))
+  } catch { /* Diagnostics must not interrupt the conversation. */ }
+}
 
 function wireName(name) {
   if (/^[A-Za-z0-9_-]{1,64}$/.test(name) && !name.startsWith('dshx_')) return name
@@ -155,25 +176,39 @@ export function registerProvider(ctx, account) {
     async *stream(options, prepared = generation, boundModel) {
       // Credential lookup is asynchronous; a change during lookup must also cancel this prepared call.
       const signal = options.signal ? AbortSignal.any([options.signal, prepared.signal]) : prepared.signal
-      signal.throwIfAborted()
-      const info = boundModel ?? await this.resolveModel(provider, options.model, signal)
-      const body = await requestBody(ctx, { ...options, signal, reasoningEffort: wireEffort(options.reasoningEffort, info.reasoning) })
-      signal.throwIfAborted()
-      const names = new Map((options.tools ?? []).map(tool => [wireName(tool.name), tool.name]))
-      let response
-      try {
-        response = await account.respond(body, { signal })
-      } catch (error) {
-        if (!Number.isInteger(error?.status) || error.status < 100 || error.status > 599) throw error
-        throw new LlmError(error.message, error.code ?? `HTTP_${error.status}`, {
-          status: error.status, ...(error.requestId && { requestId: error.requestId }),
-        })
+      let info = boundModel, effective, response
+      let logged = false
+      const record = (level, outcome, error) => {
+        logged = true
+        logOutcome(ctx, level, outcome, info?.id, options.reasoningEffort, effective, response, error)
       }
       try {
-        yield* responseChunks(response, namespace, names, signal)
+        signal.throwIfAborted()
+        info ??= await this.resolveModel(provider, options.model, signal)
+        effective = wireEffort(options.reasoningEffort, info.reasoning)
+        const body = await requestBody(ctx, { ...options, signal, reasoningEffort: effective })
+        signal.throwIfAborted()
+        const names = new Map((options.tools ?? []).map(tool => [wireName(tool.name), tool.name]))
+        response = await account.respond(body, { signal })
+        for await (const chunk of responseChunks(response, namespace, names, signal)) {
+          if (chunk.type === 'finish') {
+            // The host may stop iterating immediately after this terminal chunk.
+            if (chunk.reason.kind === 'max-tokens') record('warn', '模型输出已达长度上限')
+            else record('info', chunk.reason.kind === 'tool-calls' ? '模型请求完成（等待工具结果）' : '模型请求完成')
+          }
+          yield chunk
+        }
       } catch (error) {
-        if (typeof error?.code === 'string') await account.invalidateResponse(response, error.code)
+        if (!logged && !options.signal?.aborted) record('error', '模型请求失败', error)
+        if (response && typeof error?.code === 'string') await account.invalidateResponse(response, error.code)
+        if (!response && Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599) {
+          throw new LlmError(error.message, error.code ?? `HTTP_${error.status}`, {
+            status: error.status, ...(error.requestId && { requestId: error.requestId }),
+          })
+        }
         throw error
+      } finally {
+        if (!logged) record('info', '模型请求已取消')
       }
     }
   }

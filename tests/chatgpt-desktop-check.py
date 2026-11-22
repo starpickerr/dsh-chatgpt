@@ -136,6 +136,10 @@ def conversations(page, home, sessions):
         logged('STOP-' + preset)
         request(page, 'session/cancel', **opts)
         logged('aborted-STOP-' + preset)
+        if preset == 'alcor':
+            prompt('REJECT')
+            logged('invalid-effort')
+            request(page, 'session/wait', **opts, timeoutMs=10000)
         if preset == 'standard':
             prompt('LIMIT')
             logged('quota')
@@ -145,6 +149,46 @@ def conversations(page, home, sessions):
             route = request(page, 'session/projections', **opts)['values']['modelSelection']
             assert route['next']['provider'] == 'alcor-chatgpt' and route['lastUsed']['provider'] == 'alcor-chatgpt'
         print('PASS', preset, 'existing chat, tool result, streamed reply and cancellation', flush=True)
+
+
+def chatgpt_logs(page):
+    records = request(page, 'alcorSecretary/logs', source='ChatGPT')['entries']
+    expected = {
+        'req_fixture_tool': ('info', 'HTTP 200', 'ultra → max', '等待工具结果'),
+        'req_fixture_answer': ('info', 'HTTP 200', 'ultra → max'),
+        'req_fixture_rejected': ('error', 'HTTP 400', 'ultra → max', 'unsupported_reasoning_effort'),
+    }
+    ids = {}
+    for rid, (level, *fields) in expected.items():
+        matches = [row for row in records if rid in row['message']]
+        assert len(matches) == 1, f'Expected one ChatGPT log for {rid}, found {len(matches)}'
+        row = matches[0]
+        assert row['level'] == level and row['source'] == 'ChatGPT'
+        assert all(field in row['message'] for field in ['plan-test', *fields]), row['message']
+        ids[rid] = row['id']
+    messages = '\n'.join(row['message'] for row in records)
+    for private in ['fixture-upstream-private', 'TOOL-alcor', 'REJECT-alcor', 'synthetic-access']:
+        assert private not in messages, 'A ChatGPT diagnostic exposed fixture content'
+    return ids
+
+
+def check_log_page(page):
+    mode = page.get_by_role('button', name=re.compile(r'^切换使用模式，当前 '))
+    if not mode.get_attribute('aria-label').endswith('Alcor'):
+        mode.click()
+        page.get_by_role('menuitem', name='Alcor', exact=True).click()
+    page.get_by_role('group', name='系统', exact=True).get_by_role('button', name='日志', exact=True).click()
+    panel = page.get_by_role('region', name='运行日志')
+    panel.get_by_role('combobox', name='来源').select_option('ChatGPT')
+    panel.get_by_role('combobox', name='类别').select_option('failure')
+    panel.get_by_role('searchbox', name='搜索').fill('req_fixture_rejected')
+    details = panel.get_by_role('listitem')
+    expect(details).to_have_count(1)
+    details.locator('summary').click()
+    expect(details.locator('pre')).to_contain_text('HTTP 400')
+    expect(details.locator('pre')).to_contain_text('ultra → max')
+    expect(details.locator('pre')).to_contain_text('req_fixture_rejected')
+    panel.screenshot(path=str(desktop.ARTIFACTS / 'chatgpt-runtime-log.png'))
 
 
 def main():
@@ -174,10 +218,14 @@ def main():
             assert 'plan-test' in catalog and 'hidden-test' not in catalog
             assert 'ultra' not in catalog, 'The picker must hide unsupported Responses efforts'
             conversations(page, home, sessions)
+            saved_logs = chatgpt_logs(page)
+            check_log_page(page)
             assert not errors, errors
         with desktop.desktop(playwright, home, 'subscription-restart') as (page, errors):
             state = request(page, 'alcorChatgpt/accountState')
             assert state['activeId'] and 'plan-test' in model_catalog(page)
+            assert chatgpt_logs(page) == saved_logs, 'ChatGPT log entries must survive a Desktop restart'
+            print('PASS ChatGPT request logs, legacy effort, HTTP 400, runtime log UI and restart', flush=True)
             assert not request(page, 'alcorChatgpt/signOut', accountId=state['activeId'])['activeId']
             remaining = model_catalog(page)
             assert 'plan-test' not in remaining, remaining

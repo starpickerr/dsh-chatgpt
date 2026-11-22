@@ -27,11 +27,17 @@ function sse(...events) {
 function setup(respond, services = {}) {
   const calls = []
   const failures = []
+  const logs = []
   const models = [{ slug: model, display_name: 'Plan Model', context_window: 16000,
     input_modalities: ['text', 'image'], supported_reasoning_levels: [{ effort: 'high' }], default_reasoning_level: 'high' }]
   const listeners = new Map()
   let adapter
   const ctx = {
+    logger(name) {
+      assert.equal(name, 'ChatGPT')
+      return Object.fromEntries(['info', 'warn', 'error'].map(level =>
+        [level, message => logs.push({ level, message })]))
+    },
     on: (name, fn) => listeners.set(name, fn),
     get: name => services[name],
     llm: { registerAdapter(routes, value) { assert.deepEqual(routes, [provider]); adapter = value } },
@@ -41,7 +47,7 @@ function setup(respond, services = {}) {
     respond: async (body, init) => { calls.push(body); return respond(body, init) },
     invalidateResponse: async (response, code) => failures.push({ response, code }),
   })
-  return { adapter, calls, failures, models, changed: () => listeners.get('llm/models-updated')(provider) }
+  return { adapter, calls, failures, models, logs, changed: () => listeners.get('llm/models-updated')(provider) }
 }
 
 async function generate(adapter, request = options) {
@@ -74,6 +80,44 @@ test('the picker advertises only Responses efforts the account supports, includi
   const expected = { efforts: [{ id: 'low', name: 'low' }, { id: 'max', name: 'max' }], defaultEffort: 'max' }
   assert.deepEqual((await adapter.listModels())[0].reasoning, expected)
   assert.deepEqual((await adapter.resolveModel(provider, model)).reasoning, expected)
+})
+
+test('a completed call logs the applied reasoning effort before the host stops reading, without conversation content', async () => {
+  const response = sse(complete([textItem('private output')]))
+  response.headers.set('x-request-id', 'req_fixture')
+  const { adapter, models, logs } = setup(() => response)
+  models[0].supported_reasoning_levels = [{ effort: 'ultra' }, { effort: 'max' }]
+  const call = await adapter.prepareCall(provider, model)
+  for await (const chunk of call.stream({ ...options, reasoningEffort: 'ultra' })) {
+    if (chunk.type === 'finish') {
+      assert.equal(logs.length, 1)
+      break
+    }
+  }
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0].level, 'info')
+  assert.match(logs[0].message, /模型请求完成.*test-plan-model.*ultra → max.*HTTP 200.*req_fixture/)
+  assert.doesNotMatch(logs[0].message, /private output|查询课程/)
+})
+
+test('HTTP and stream failures each log one result with safe metadata', async () => {
+  const http = Object.assign(new Error('private upstream details'), {
+    status: 400, code: 'unsupported_reasoning_effort', requestId: 'req_http_test',
+  })
+  const truncated = sse(added(0, textItem('private partial output')))
+  truncated.headers.set('x-request-id', 'private/header')
+  for (const [respond, pattern] of [
+    [() => { throw http }, /HTTP 400.*unsupported_reasoning_effort.*req_http_test/],
+    [() => truncated, /HTTP 200.*STREAM_CLOSED/],
+    [() => { throw Object.assign(new Error('private'), { code: 'private_secret' }) }, /REQUEST_FAILED/],
+  ]) {
+    const { adapter, logs } = setup(respond)
+    await assert.rejects(generate(adapter))
+    assert.equal(logs.length, 1)
+    assert.equal(logs[0].level, 'error')
+    assert.match(logs[0].message, pattern)
+    assert.doesNotMatch(logs[0].message, /private|查询课程/)
+  }
 })
 
 test('DSH dispatch accepts saved efforts and sends only the selected model’s supported Responses value', async t => {
@@ -181,7 +225,7 @@ test('native cancellation closes an idle subscription stream and prevents a pre-
   let cancel
   const upstreamCancelled = new Promise(resolve => { cancel = resolve })
   const controller = new AbortController()
-  const { adapter, calls } = setup((_body, { signal }) => {
+  const { adapter, calls, logs } = setup((_body, { signal }) => {
     assert.ok(signal instanceof AbortSignal && !signal.aborted)
     return new Response(new ReadableStream({
       start(stream) {
@@ -200,12 +244,18 @@ test('native cancellation closes an idle subscription stream and prevents a pre-
   await upstreamCancelled
   await assert.rejects(generate(adapter, { ...options, signal: controller.signal }), { name: 'AbortError' })
   assert.equal(calls.length, 1)
+  assert.equal(logs.length, 2)
+  assert.ok(logs.every(row => row.level === 'info' && row.message.includes('模型请求已取消')))
 })
 
 test('DSH dispatch resolves only this route, projects native tools and removes the adapter on unload', async t => {
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
   await ctx.plugin(LlmRuntime)
+  const logs = []
+  ctx.logger.exporter({ colors: false, levels: { default: 3 }, export(message) {
+    if (message.name === 'ChatGPT') logs.push(message)
+  } })
   let body
   const plugin = ctx.plugin({
     inject: ['llm'],
@@ -223,6 +273,9 @@ test('DSH dispatch resolves only this route, projects native tools and removes t
   const assembly = new BlockAssembler()
   for await (const chunk of ctx.llm.stream({ ...options, tools: originalTools })) assembly.push(chunk)
   assert.deepEqual(assembly.blocks(), [{ type: 'text', text: '好' }])
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0].type, 'info')
+  assert.match(logs[0].args.join(' '), /模型请求完成.*HTTP 200/)
   assert.equal(body.tools[0].type, 'namespace')
   await plugin.dispose()
   assert.deepEqual(ctx.llm.listProviders(), [])

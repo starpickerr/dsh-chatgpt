@@ -11,15 +11,22 @@ const errors = {
   chatpass_v2_invalid_authorization_context: 'OpenAI 未接受此账号的套餐授权，请重新连接。',
   subscription_sharing_invalid_user: 'OpenAI 无法验证此账号，请检查 ChatGPT 登录连接。',
 }
+export const isPlanErrorCode = code => typeof code === 'string' && Object.hasOwn(errors, code)
+
+export function safeRequestId(value) {
+  return typeof value === 'string' && /^req_[A-Za-z0-9_-]{1,120}$/.test(value) ? value : undefined
+}
+
 export function publicError(code, status) {
-  const message = Object.hasOwn(errors, code) ? errors[code] : ({
+  const known = isPlanErrorCode(code)
+  const message = known ? errors[code] : ({
     401: 'OpenAI 未接受当前授权，请重新连接 ChatGPT。',
     403: 'OpenAI 拒绝了此请求，请检查账号授权、工作区或地区限制。',
     429: 'ChatGPT 请求受到限制，请稍后重试或查看用量。',
   })[status] ?? 'OpenAI 请求未完成，请稍后重试。'
   const error = new Error(status ? `${message}（HTTP ${status}）` : message)
   if (status) error.status = status
-  if (Object.hasOwn(errors, code)) error.code = code
+  if (known) error.code = code
   error.terminal = terminal.has(code)
   return error
 }
@@ -30,7 +37,7 @@ export async function upstreamError(response) {
   const unsupportedEffort = response.status === 400 && body?.error?.param === 'reasoning.effort'
     && (code === 'invalid_value' || code === 'unsupported_value')
   const error = publicError(unsupportedEffort ? 'unsupported_reasoning_effort' : code, response.status)
-  const requestId = response.headers.get('x-request-id')
-  if (requestId && /^req_[A-Za-z0-9_-]{1,120}$/.test(requestId)) error.requestId = requestId
+  const requestId = safeRequestId(response.headers.get('x-request-id'))
+  if (requestId) error.requestId = requestId
   return error
 }
