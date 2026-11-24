@@ -22,6 +22,8 @@ npm pack
 
 `npm test` 使用模拟账号验证授权、模型调用和工具回传。`npm pack` 会构建服务端和客户端并生成原生插件安装包。在 DSH Desktop 0.2.2-rc.5 的插件管理页面选择此安装包即可。单独安装本插件即可在 DSH 中使用；已安装 Alcor 的 Profile 也能使用同一模型提供商。
 
+Windows x64 可直接用 PowerShell 运行上述命令。插件优先使用 DSH 启动代理。未配置时，插件读取当前 Windows 用户的系统代理和绕过规则。
+
 ## 两种对话模式的桌面验收
 
 隔离验收使用官方 DSH Desktop、合成账号和 Alcor 的桌面测试辅助模块。为包含 Playwright 的 Python 环境设置 `ALCOR_SOURCE`（Alcor 源码目录）、`SECRETARY_ARCHIVE`（Alcor 原生安装包），然后执行：
