@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
@@ -15,7 +16,7 @@ function run(args) {
   return JSON.stringify({type: value('kCFProxyTypeKey'), host: value('kCFProxyHostNameKey'), port: value('kCFProxyPortNumberKey')})
 }`
 
-async function systemProxy(origin, signal) {
+async function macSystemProxy(origin, signal) {
   const { stdout } = await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', lookup, origin], {
     signal, timeout: 5000, maxBuffer: 8192,
   })
@@ -31,6 +32,28 @@ async function systemProxy(origin, signal) {
   return new URL('http://' + (host.includes(':') && !host.startsWith('[') ? '[' + host + ']' : host) + ':' + port).origin
 }
 
+const windowsLookup = `
+$ErrorActionPreference = 'Stop'
+$target = [Uri]$env:ALCOR_CHATGPT_PROXY_ORIGIN
+$proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+if (-not $proxy.IsBypassed($target)) { $proxy.GetProxy($target).AbsoluteUri }
+`
+
+async function windowsSystemProxy(origin, signal) {
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32',
+    'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const { stdout } = await run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', windowsLookup], {
+    env: { ...process.env, ALCOR_CHATGPT_PROXY_ORIGIN: origin },
+    windowsHide: true, signal, timeout: 5000, maxBuffer: 8192,
+  })
+  if (!stdout.trim()) return null
+  const proxy = new URL(stdout.trim())
+  if (!['http:', 'https:'].includes(proxy.protocol) || proxy.username || proxy.password) {
+    throw new Error('当前系统代理类型需要在 DSH 中配置 HTTP 或 HTTPS 代理。')
+  }
+  return proxy.origin
+}
+
 async function systemDispatcher(proxy, env) {
   const { createRouteDispatcher } = await import('@deepseek-ai/dsh-http-proxy')
   // The signed host runs Node's built-in fetch against the SDK's newer undici dispatcher ABI.
@@ -42,7 +65,8 @@ async function systemDispatcher(proxy, env) {
   return new Dispatcher1Wrapper(dispatcher)
 }
 
-export function createPlanFetch(ctx, { platform = process.platform, env = process.env, resolve = systemProxy,
+export function createPlanFetch(ctx, { platform = process.platform, env = process.env,
+  resolve = platform === 'win32' ? windowsSystemProxy : macSystemProxy,
   dispatcher = systemDispatcher, fetch = globalThis.fetch } = {}) {
   const pools = new Map()
   ctx.effect(() => () => {
@@ -55,7 +79,7 @@ export function createPlanFetch(ctx, { platform = process.platform, env = proces
     const options = { ...init, redirect: 'error', credentials: 'omit' }
     options.signal?.throwIfAborted()
     // When DSH has a launch proxy it already installs its own global dispatcher and bypass rules.
-    if (platform !== 'darwin' || proxyEnvironment.some(key => env[key]?.trim())) return fetch(url, options)
+    if (!['darwin', 'win32'].includes(platform) || proxyEnvironment.some(key => env[key]?.trim())) return fetch(url, options)
     try {
       const proxy = await resolve(origin, options.signal)
       options.signal?.throwIfAborted()

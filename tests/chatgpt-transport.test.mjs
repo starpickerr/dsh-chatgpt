@@ -40,13 +40,25 @@ test('plan transport follows network changes and bypasses, sharing only matching
 })
 
 test('host proxy and other platforms retain their DSH transport and cookie-free redirect policy', async () => {
-  for (const options of [{ env: { HTTPS_PROXY: 'http://configured.invalid' } }, { platform: 'win32' }]) {
+  for (const options of [{ platform: 'darwin', env: { HTTPS_PROXY: 'http://configured.invalid' } },
+    { platform: 'win32', env: { HTTPS_PROXY: 'http://configured.invalid' } }, { platform: 'linux' }]) {
     const f = fixture(options)
     await f.fetch(endpoint, { redirect: 'follow', credentials: 'include' })
     assert.equal(f.calls[0].init.redirect, 'error')
     assert.equal(f.calls[0].init.credentials, 'omit')
     assert.deepEqual(f.routes, [])
   }
+})
+
+test('Windows uses the user proxy route and permits Windows to bypass it per destination', async () => {
+  const f = fixture({ platform: 'win32' })
+  f.route('http://windows.invalid:8080')
+  await f.fetch(endpoint)
+  f.route(null)
+  await f.fetch(endpoint)
+  assert.deepEqual(f.routes, ['https://api.openai.com', 'https://api.openai.com'])
+  assert.equal(f.calls[0].init.dispatcher.proxy, 'http://windows.invalid:8080')
+  assert.equal(f.calls[1].init.dispatcher, undefined)
 })
 
 test('unexpected destinations, failed route lookups and aborted requests never send credentials', async () => {
